@@ -81,16 +81,18 @@ static int render_req(const paige_doc *doc, paige_stats *stats,
 
 static int render_line_matches(const paige_doc *doc, paige_stats *stats,
                                struct seglist *sl, size_t L, int w,
+                               unsigned flags, size_t hscroll,
                                const paige_match *matches, size_t nmatches)
 {
-    paige_render_req req = {L, w, PAIGE_RENDER_WRAP, 0, matches, nmatches};
+    paige_render_req req = {L, w, flags, hscroll, matches, nmatches};
     return render_req(doc, stats, sl, &req);
 }
 
 static int render_line(const paige_doc *doc, paige_stats *stats,
                        struct seglist *sl, size_t L, int w)
 {
-    return render_line_matches(doc, stats, sl, L, w, NULL, 0);
+    return render_line_matches(doc, stats, sl, L, w, PAIGE_RENDER_WRAP, 0, NULL,
+                               0);
 }
 
 /* ---- an output accumulator we flush to the terminal in one write ---- */
@@ -165,6 +167,8 @@ struct view {
     const paige_doc *doc;
     struct seglist *sl;
     int width;
+    bool chop;
+    size_t hscroll;
     size_t L;     /* top logical line */
     int S;        /* top visual segment within L */
     long pending; /* number being typed for goto, or -1 when not entering */
@@ -175,6 +179,7 @@ struct view {
 struct view_pos {
     size_t L;
     int S;
+    size_t hscroll;
 };
 
 static bool draw(struct view *v, struct paige_term *t, struct outbuf *o);
@@ -183,12 +188,32 @@ static void view_save(struct view *v, struct view_pos *pos)
 {
     pos->L = v->L;
     pos->S = v->S;
+    pos->hscroll = v->hscroll;
 }
 
 static void view_restore(struct view *v, const struct view_pos *pos)
 {
     v->L = pos->L;
     v->S = pos->S;
+    v->hscroll = pos->hscroll;
+}
+
+static int view_content_width(const struct view *v)
+{
+    if (!v->chop)
+        return v->width;
+    if (v->width > 2)
+        return v->width - 2;
+    return 1;
+}
+
+static bool line_has_right_overflow(struct view *v, size_t L, int content_w)
+{
+    paige_line line;
+    if (!v->chop || !v->doc->raw_line ||
+        !v->doc->raw_line(v->doc->ctx, L, &line))
+        return false;
+    return line.len > v->hscroll + (size_t)content_w;
 }
 
 static void search_clear_message(struct search_state *s)
@@ -323,6 +348,14 @@ static void search_activate(struct view *v, const struct search_hit *hit)
     v->search->active_len = hit->len;
     v->L = hit->L;
     v->S = 0;
+    if (v->chop) {
+        int w = view_content_width(v);
+        size_t end = hit->off + hit->len;
+        if (hit->off < v->hscroll)
+            v->hscroll = hit->off;
+        else if (end > v->hscroll + (size_t)w)
+            v->hscroll = end > (size_t)w ? end - (size_t)w : 0;
+    }
     if (hit->wrapped)
         snprintf(v->search->message, sizeof v->search->message,
                  "search wrapped");
@@ -499,7 +532,11 @@ static size_t collect_matches(struct view *v, size_t L, paige_match *matches,
 
 static int segcount(struct view *v, size_t L)
 {
-    return render_line(v->doc, v->stats, v->sl, L, v->width);
+    if (!v->chop)
+        return render_line(v->doc, v->stats, v->sl, L, v->width);
+    return render_line_matches(v->doc, v->stats, v->sl, L,
+                               view_content_width(v), PAIGE_RENDER_CHOP,
+                               v->hscroll, NULL, 0);
 }
 
 static void move_down(struct view *v, int k)
@@ -551,6 +588,29 @@ static void goto_line(struct view *v, unsigned long n)
     v->S = 0;
 }
 
+static void move_left(struct view *v, size_t cols)
+{
+    if (!v->chop)
+        return;
+    if (v->stats)
+        v->stats->hscroll_moves++;
+    if (v->hscroll > cols)
+        v->hscroll -= cols;
+    else
+        v->hscroll = 0;
+    v->S = 0;
+}
+
+static void move_right(struct view *v, size_t cols)
+{
+    if (!v->chop)
+        return;
+    if (v->stats)
+        v->stats->hscroll_moves++;
+    v->hscroll += cols;
+    v->S = 0;
+}
+
 /* Render the visible screen into `o`; returns true if the bottom (EOF) shows.
  */
 static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
@@ -572,14 +632,21 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
         size_t nmatches = 0;
         if (!at_eof)
             nmatches = collect_matches(v, L, matches, SEARCH_MATCH_MAX);
+        int content_w = view_content_width(v);
+        unsigned flags = v->chop ? PAIGE_RENDER_CHOP : PAIGE_RENDER_WRAP;
         int n = at_eof ? 0 : render_line_matches(v->doc, v->stats, v->sl, L,
-                                                  v->width, matches, nmatches);
+                                                  content_w, flags, v->hscroll,
+                                                  matches, nmatches);
         if (n == 0) {
             at_eof = true;
             ob_str(o, "~");
         } else {
+            if (v->chop)
+                ob_str(o, v->hscroll > 0 ? "<" : " ");
             if (S < n)
                 ob_put(o, v->sl->buf + v->sl->seg[S].off, v->sl->seg[S].len);
+            if (v->chop && line_has_right_overflow(v, L, content_w))
+                ob_str(o, ">");
             if (++S >= n) {
                 L++;
                 S = 0;
@@ -603,6 +670,9 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
                  v->search->message);
     else if (v->search && v->search->message[0])
         snprintf(num, sizeof num, "  %s ", v->search->message);
+    else if (v->chop)
+        snprintf(num, sizeof num, "  line %zu  col %zu%s ", v->L + 1,
+                 v->hscroll + 1, at_eof ? "  (END)" : "");
     else
         snprintf(num, sizeof num, "  line %zu%s ", v->L + 1,
                  at_eof ? "  (END)" : "");
@@ -664,7 +734,16 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
 
     paige_term_enter(&t);
     struct search_state search = {0};
-    struct view v = {doc, &sl, t.cols, 0, 0, -1, stats, &search};
+    struct view v = {doc,
+                     &sl,
+                     t.cols,
+                     opts && opts->chop_long_lines && doc->render_line_ex,
+                     0,
+                     0,
+                     0,
+                     -1,
+                     stats,
+                     &search};
     struct outbuf o = {0};
 
     /* Pause between digits: a wait longer than this commits the running number
@@ -709,6 +788,14 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
             goto redispatch; /* let the terminating key act */
         }
         switch (key) {
+        case PK_RIGHT:
+            search_clear_message(&search);
+            move_right(&v, 8);
+            break;
+        case PK_LEFT:
+            search_clear_message(&search);
+            move_left(&v, 8);
+            break;
         case PK_SEARCH_FWD:
             (void)search_enter(&v, &t, &o, SEARCH_FORWARD);
             break;

@@ -51,6 +51,7 @@ typedef struct paige_stats {
     unsigned long long bytes_emitted;
     unsigned long long writes;
     unsigned long long search_lines;
+    unsigned long long hscroll_moves;
 } paige_stats;
 
 typedef struct paige_doc {
@@ -92,6 +93,7 @@ typedef struct paige_opts {
     int quit_if_one_screen; /* if nonzero, just print and return when it fits */
     int goto_pause_ms;      /* digit-goto entry timeout; <=0 uses the default */
     paige_stats *stats;     /* optional counters; zeroed at paige_run start */
+    int chop_long_lines;    /* if nonzero, show one row per logical line */
 } paige_opts;
 
 /*

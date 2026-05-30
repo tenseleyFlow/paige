@@ -37,6 +37,8 @@ path for upcoming features:
   back to `render_line`.
 - `paige_opts.stats` can point at a `paige_stats` struct; paige zeroes and fills
   it with basic render/write/search counters during `paige_run`.
+- `paige_opts.chop_long_lines` requests no-wrap display through
+  `render_line_ex`; zero keeps the default wrapping behavior.
 
 ## Build
 
@@ -51,10 +53,10 @@ and the BSDs.
 
 ## Keys
 `q` quit · `j`/`k`/`↑`/`↓` line · space/`f`/`b` page · `d`/`u` half-page ·
-`g`/`G` top/bottom · `/`/`?` search · `n`/`N` repeat search · digits jump to a
-line as you type — the view follows each keystroke (`1`,`6` → line 16), and a
-pause longer than ~600ms commits the number and starts a fresh one (`1` … `6` →
-line 6).
+`g`/`G` top/bottom · `/`/`?` search · `n`/`N` repeat search · `←`/`→`
+horizontal scroll in chop mode · digits jump to a line as you type — the view
+follows each keystroke (`1`,`6` → line 16), and a pause longer than ~600ms
+commits the number and starts a fresh one (`1` … `6` → line 6).
 
 ## License
 MIT — see [LICENSE](LICENSE).
