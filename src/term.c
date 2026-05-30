@@ -2,12 +2,12 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 
 /* SIGWINCH sets this; the key loop turns it into PK_RESIZE. */
 static volatile sig_atomic_t paige_resized = 0;
@@ -196,12 +196,21 @@ int paige_term_key(struct paige_term *t)
 
 int paige_term_key_timed(struct paige_term *t, int timeout_ms)
 {
+    /* select(), not poll(): poll() on a tty does not reliably honor the timeout
+     * on macOS, which left the digit-goto entry waiting forever for the next
+     * key instead of committing on a pause. select() is the portable primitive
+     * for a tty read with a deadline. */
     for (;;) {
-        struct pollfd p = {t->tty_fd, POLLIN, 0};
-        int pr = poll(&p, 1, timeout_ms);
-        if (pr == 0)
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(t->tty_fd, &rfds);
+        struct timeval tv;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        int sr = select(t->tty_fd + 1, &rfds, NULL, NULL, &tv);
+        if (sr == 0)
             return PK_TIMEOUT;
-        if (pr < 0) {
+        if (sr < 0) {
             if (errno == EINTR) {
                 if (paige_resized) {
                     paige_resized = 0;
