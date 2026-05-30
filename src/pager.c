@@ -105,8 +105,9 @@ struct view {
     const paige_doc *doc;
     struct seglist *sl;
     int width;
-    size_t L; /* top logical line */
-    int S;    /* top visual segment within L */
+    size_t L;     /* top logical line */
+    int S;        /* top visual segment within L */
+    long pending; /* number being typed for goto, or -1 when not entering */
 };
 
 static int segcount(struct view *v, size_t L)
@@ -146,6 +147,23 @@ static void move_up(struct view *v, int k)
     }
 }
 
+/* Jump so logical line N (1-based) is at the top, clamped to the last line.
+ * Lazy: rendering line N-1 builds the index only that far; a number past EOF
+ * walks forward to the final existing line (rare, only on overshoot). */
+static void goto_line(struct view *v, unsigned long n)
+{
+    size_t target = n > 0 ? (size_t)(n - 1) : 0;
+    if (segcount(v, target) == 0) {
+        /* past EOF: settle on the last line that exists */
+        size_t last = 0;
+        while (segcount(v, last + 1) != 0)
+            last++;
+        target = last;
+    }
+    v->L = target;
+    v->S = 0;
+}
+
 /* Render the visible screen into `o`; returns true if the bottom (EOF) shows.
  */
 static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
@@ -179,8 +197,11 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
     if (v->doc->title)
         ob_str(o, v->doc->title);
     char num[64];
-    snprintf(num, sizeof num, "  line %zu%s ", v->L + 1,
-             at_eof ? "  (END)" : "");
+    if (v->pending >= 0)
+        snprintf(num, sizeof num, "  :%ld ", v->pending);
+    else
+        snprintf(num, sizeof num, "  line %zu%s ", v->L + 1,
+                 at_eof ? "  (END)" : "");
     ob_str(o, num);
     ob_str(o, "\x1b[0m");
     return at_eof;
@@ -231,8 +252,12 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
     }
 
     paige_term_enter(&t);
-    struct view v = {doc, &sl, t.cols, 0, 0};
+    struct view v = {doc, &sl, t.cols, 0, 0, -1};
     struct outbuf o = {0};
+
+    /* ~600ms between digits: longer pauses commit the running number and start
+     * a fresh one, so "1<pause>6" lands on 6 while "16" lands on sixteen. */
+    enum { GOTO_PAUSE_MS = 600, GOTO_MAX = 1000000000L };
 
     for (;;) {
         draw(&v, &t, &o);
@@ -240,8 +265,32 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
 
         int key = paige_term_key(&t);
         int body = t.rows - 1;
+    redispatch:
         if (key == PK_QUIT)
             break;
+        if (key == PK_DIGIT) {
+            /* Live incremental goto: each digit extends the number and jumps
+             * immediately; a pause longer than GOTO_PAUSE_MS ends entry. The
+             * terminating keystroke (if any) is re-dispatched so "16q" quits
+             * and "16j" then scrolls. */
+            long acc = 0;
+            int k;
+            do {
+                acc = acc * 10 + t.digit;
+                if (acc > GOTO_MAX)
+                    acc = GOTO_MAX;
+                goto_line(&v, (unsigned long)acc);
+                v.pending = acc;
+                draw(&v, &t, &o);
+                (void)!write(t.out_fd, o.p, o.len);
+                k = paige_term_key_timed(&t, GOTO_PAUSE_MS);
+            } while (k == PK_DIGIT);
+            v.pending = -1;
+            if (k == PK_TIMEOUT)
+                continue; /* paused: commit and wait for the next command */
+            key = k;
+            goto redispatch; /* let the terminating key act */
+        }
         switch (key) {
         case PK_DOWN:
             move_down(&v, 1);

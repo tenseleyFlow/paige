@@ -40,7 +40,9 @@ and the BSDs.
 
 ## Keys
 `q` quit · `j`/`k`/`↑`/`↓` line · space/`f`/`b` page · `d`/`u` half-page ·
-`g`/`G` top/bottom.
+`g`/`G` top/bottom · digits jump to a line as you type — the view follows each
+keystroke (`1`,`6` → line 16), and a pause longer than ~600ms commits the number
+and starts a fresh one (`1` … `6` → line 6).
 
 ## License
 MIT — see [LICENSE](LICENSE).

@@ -125,6 +125,34 @@ int main(void)
         fails++;
     }
 
+    /* live incremental goto: digits accumulate while typed quickly. */
+    (void)!write(master, "16", 2);
+    read_screen(master, buf, sizeof buf, 400);
+    if (!has(buf, "line016") || !has(buf, "line024")) {
+        printf("FAIL: '16' did not jump to line 16\n");
+        fails++;
+    }
+    if (has(buf, "line030")) {
+        printf("FAIL: '16' overshot\n");
+        fails++;
+    }
+
+    /* a pause longer than the entry timeout commits the first number and starts
+     * a new one: "1" <pause> "6" lands on line 6, not line 16. */
+    (void)!write(master, "1", 1);
+    read_screen(master, buf, sizeof buf, 250);
+    usleep(800 * 1000); /* exceed the ~600ms digit-entry timeout */
+    (void)!write(master, "6", 1);
+    read_screen(master, buf, sizeof buf, 400);
+    if (!has(buf, "line006") || !has(buf, "line014")) {
+        printf("FAIL: paused '1..6' should land on line 6\n");
+        fails++;
+    }
+    if (has(buf, "line016")) {
+        printf("FAIL: paused '1..6' wrongly accumulated to 16\n");
+        fails++;
+    }
+
     (void)!write(master, "q", 1); /* quit */
     /* Drain remaining output so the child never blocks on a full pty buffer. */
     read_screen(master, buf, sizeof buf, 300);
@@ -141,7 +169,7 @@ int main(void)
     unlink(tmpl);
 
     if (fails == 0) {
-        printf("pty: pager nav (j/G/g/q, quit-if-one-screen) OK\n");
+        printf("pty: pager nav (j/G/g/q, goto-digits, quit-if-one-screen) OK\n");
         return 0;
     }
     return 1;

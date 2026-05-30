@@ -16,6 +16,7 @@ struct paige_term {
     bool raw;
     bool alt;
     int rows, cols;
+    int digit; /* 0..9 when the last key was PK_DIGIT */
 };
 
 /* Decoded key actions. */
@@ -30,7 +31,9 @@ enum paige_key {
     PK_HALFDOWN,
     PK_TOP,
     PK_BOTTOM,
+    PK_DIGIT,   /* a digit was typed; value in t->digit */
     PK_RESIZE,
+    PK_TIMEOUT, /* paige_term_key_timed: no key within the deadline */
     PK_OTHER
 };
 
@@ -50,5 +53,9 @@ void paige_term_size(struct paige_term *t);
 /* Block for one key, returning a decoded action (PK_RESIZE on a window
  * change). */
 int paige_term_key(struct paige_term *t);
+
+/* Like paige_term_key but wait at most timeout_ms; PK_TIMEOUT if none arrives.
+ * Used for the live digit-goto, where a pause ends number entry. */
+int paige_term_key_timed(struct paige_term *t, int timeout_ms);
 
 #endif /* PAIGE_TERM_H */

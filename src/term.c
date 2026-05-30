@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,6 +134,44 @@ static int decode_escape(struct paige_term *t)
     }
 }
 
+/* Map one input byte to an action. */
+static int decode_byte(struct paige_term *t, unsigned char c)
+{
+    if (c >= '0' && c <= '9') {
+        t->digit = c - '0';
+        return PK_DIGIT;
+    }
+    switch (c) {
+    case 'q':
+    case 'Q':
+    case 3: /* Ctrl-C */
+        return PK_QUIT;
+    case 'j':
+    case '\n':
+    case '\r':
+        return PK_DOWN;
+    case 'k':
+        return PK_UP;
+    case ' ':
+    case 'f':
+        return PK_PGDN;
+    case 'b':
+        return PK_PGUP;
+    case 'd':
+        return PK_HALFDOWN;
+    case 'u':
+        return PK_HALFUP;
+    case 'g':
+        return PK_TOP;
+    case 'G':
+        return PK_BOTTOM;
+    case 0x1b:
+        return decode_escape(t);
+    default:
+        return PK_OTHER;
+    }
+}
+
 int paige_term_key(struct paige_term *t)
 {
     for (;;) {
@@ -151,35 +190,32 @@ int paige_term_key(struct paige_term *t)
         }
         if (r == 0)
             return PK_QUIT;
+        return decode_byte(t, c);
+    }
+}
 
-        switch (c) {
-        case 'q':
-        case 'Q':
-        case 3: /* Ctrl-C */
+int paige_term_key_timed(struct paige_term *t, int timeout_ms)
+{
+    for (;;) {
+        struct pollfd p = { t->tty_fd, POLLIN, 0 };
+        int pr = poll(&p, 1, timeout_ms);
+        if (pr == 0)
+            return PK_TIMEOUT;
+        if (pr < 0) {
+            if (errno == EINTR) {
+                if (paige_resized) {
+                    paige_resized = 0;
+                    paige_term_size(t);
+                    return PK_RESIZE;
+                }
+                continue;
+            }
             return PK_QUIT;
-        case 'j':
-        case '\n':
-        case '\r':
-            return PK_DOWN;
-        case 'k':
-            return PK_UP;
-        case ' ':
-        case 'f':
-            return PK_PGDN;
-        case 'b':
-            return PK_PGUP;
-        case 'd':
-            return PK_HALFDOWN;
-        case 'u':
-            return PK_HALFUP;
-        case 'g':
-            return PK_TOP;
-        case 'G':
-            return PK_BOTTOM;
-        case 0x1b:
-            return decode_escape(t);
-        default:
-            return PK_OTHER;
         }
+        unsigned char c;
+        ssize_t r = read(t->tty_fd, &c, 1);
+        if (r <= 0)
+            return PK_QUIT;
+        return decode_byte(t, c);
     }
 }
