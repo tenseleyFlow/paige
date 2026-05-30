@@ -187,6 +187,14 @@ int paige_term_decode_command_byte(struct paige_term *t, unsigned char c)
         return PK_DOWN;
     case 'k':
         return PK_UP;
+    case '/':
+        return PK_SEARCH_FWD;
+    case '?':
+        return PK_SEARCH_BACK;
+    case 'n':
+        return PK_SEARCH_NEXT;
+    case 'N':
+        return PK_SEARCH_PREV;
     case ' ':
     case 'f':
         return PK_PGDN;

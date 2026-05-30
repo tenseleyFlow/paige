@@ -11,7 +11,7 @@ mkdir -p tests/build
 
 if ! $CC -std=c11 -O2 -Wall -Wextra -Wshadow -Wconversion \
     -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Isrc \
-    tests/unit_test.c src/term.c -o tests/build/unit_test; then
+    tests/unit_test.c src/term.c src/search.c -o tests/build/unit_test; then
     echo "could not build unit_test"; exit 1
 fi
 tests/build/unit_test

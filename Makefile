@@ -14,12 +14,16 @@ build/term.o: src/term.c src/term.h include/paige.h
 	@mkdir -p build
 	$(CC) $(ALLCFLAGS) -c src/term.c -o build/term.o
 
-build/pager.o: src/pager.c src/term.h include/paige.h
+build/search.o: src/search.c src/search.h
+	@mkdir -p build
+	$(CC) $(ALLCFLAGS) -c src/search.c -o build/search.o
+
+build/pager.o: src/pager.c src/term.h src/search.h include/paige.h
 	@mkdir -p build
 	$(CC) $(ALLCFLAGS) -c src/pager.c -o build/pager.o
 
-build/libpaige.a: build/term.o build/pager.o
-	ar rcs build/libpaige.a build/term.o build/pager.o
+build/libpaige.a: build/term.o build/search.o build/pager.o
+	ar rcs build/libpaige.a build/term.o build/search.o build/pager.o
 
 build/demo.o: src/demo.c include/paige.h
 	@mkdir -p build
