@@ -56,6 +56,19 @@ static int has(const char *hay, const char *needle)
     return strstr(hay, needle) != NULL;
 }
 
+/* On failure, report which line markers the captured screen actually holds. */
+static void dump_visible(const char *buf)
+{
+    printf("  visible lines:");
+    for (int i = 1; i <= 100; i++) {
+        char needle[16];
+        snprintf(needle, sizeof needle, "line%03d", i);
+        if (strstr(buf, needle))
+            printf(" %d", i);
+    }
+    printf("\n");
+}
+
 int main(void)
 {
     signal(SIGALRM, on_alarm);
@@ -156,10 +169,12 @@ int main(void)
     read_screen(master, buf, sizeof buf, 300);
     if (!has(buf, "line006") || !has(buf, "line014")) {
         printf("FAIL: paused '1..6' should land on line 6\n");
+        dump_visible(buf);
         fails++;
     }
     if (has(buf, "line016")) {
         printf("FAIL: paused '1..6' wrongly accumulated to 16\n");
+        dump_visible(buf);
         fails++;
     }
     usleep(800 * 1000); /* commit before the quit test */
