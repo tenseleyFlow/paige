@@ -14,6 +14,10 @@
 
 #include <stddef.h>
 
+#define PAIGE_VERSION_MAJOR 0
+#define PAIGE_VERSION_MINOR 1
+#define PAIGE_VERSION_PATCH 0
+
 /* Opaque sink: the client calls paige_emit() once per visual segment (one
  * screen row's worth of bytes, ANSI allowed, no trailing newline). */
 typedef struct paige_sink paige_sink;
@@ -74,10 +78,11 @@ typedef struct paige_doc {
         *title; /* shown in the status line, e.g. a filename (may be NULL) */
 
     /*
-     * Optional raw logical line access for features that must not search or
-     * reason over terminal-rendered output. Return 1 when `lineno` exists and
-     * fill `out`; return 0 at EOF. Bytes must remain valid until the next call
-     * into the same document context.
+     * Optional raw logical line access for features that must not inspect
+     * terminal-rendered output. Return 1 when `lineno` exists and fill `out`;
+     * return 0 at EOF. Bytes must be raw source bytes without a trailing
+     * newline and must remain valid until the next call into the same document
+     * context.
      */
     int (*raw_line)(void *ctx, size_t lineno, paige_line *out);
 
@@ -90,8 +95,9 @@ typedef struct paige_doc {
     int (*render_line_ex)(void *ctx, const paige_render_req *req,
                           paige_sink *sink);
 
-    /* Optional known logical line count. Enables percentage jumps without
-     * forcing paige to scan an unknown or streaming document to EOF. */
+    /* Optional known logical line count. Set `out` to the current count and
+     * return nonzero. Enables percentage jumps without forcing paige to scan an
+     * unknown or streaming document to EOF. */
     int (*line_count)(void *ctx, size_t *out);
 
     /* Optional live-content refresh. Called while follow mode is active; return
@@ -100,6 +106,8 @@ typedef struct paige_doc {
 } paige_doc;
 
 typedef struct paige_opts {
+    /* All fields are optional; a zero-initialized paige_opts keeps default
+     * behavior. */
     int quit_if_one_screen; /* if nonzero, just print and return when it fits */
     int goto_pause_ms;      /* digit-goto entry timeout; <=0 uses the default */
     paige_stats *stats;     /* optional counters; zeroed at paige_run start */

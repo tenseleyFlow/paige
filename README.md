@@ -27,8 +27,8 @@ paige_opts opts = { .quit_if_one_screen = 1 };
 paige_run(&doc, &opts);   // 0 on quit, -1 if there's no terminal
 ```
 
-Optional hooks keep the basic API small while giving richer clients a faster
-path for upcoming features:
+Optional hooks keep the basic API small while giving richer clients precise
+control over search, layout, live content, and performance counters:
 
 - `raw_line(ctx, lineno, out)` exposes source bytes for search and semantic
   features without inspecting ANSI-rendered output.
@@ -53,9 +53,11 @@ path for upcoming features:
 
 ```sh
 make            # builds build/libpaige.a and the paige-demo binary
+make examples   # builds examples/memory
 make test       # PTY-driven interactive tests
 make bench-smoke # tiny benchmark script health check
 ./paige-demo FILE   # a minimal standalone pager
+./examples/memory   # embedded static document with raw search + chop mode
 ```
 
 No external dependencies. C11 + POSIX (termios), portable across Linux, macOS,
@@ -63,6 +65,32 @@ and the BSDs.
 
 For local performance work, run `sh bench/pager.sh --help`. Full benchmarks are
 manual and fixture-backed; normal CI/test runs stay fast.
+
+If `/dev/tty` or terminal output is unavailable, `paige_run` returns `-1`; hosts
+should then print plainly or choose their own non-interactive fallback.
+
+## Features
+
+| feature | status | host requirement |
+|---|---|---|
+| Lazy render-on-demand | built in | `render_line` or `render_line_ex` |
+| Smart-case literal search | built in | `raw_line` for searchable source bytes |
+| Search highlighting | host-rendered | honor `paige_render_req.matches` |
+| Chop / horizontal scroll | opt-in | `paige_opts.chop_long_lines` + `render_line_ex` |
+| Percent goto | opt-in | `line_count` |
+| Follow mode | opt-in | `refresh` |
+| Marks, help, perf panel | built in | perf counters need `paige_opts.stats` |
+| Benchmarks | manual | `bench/pager.sh` fixtures |
+
+## Limits
+
+- Layout is byte-oriented. paige does not claim Unicode display-width correctness.
+- Search is literal smart-case substring search, not regex.
+- ANSI styling is passed through host-rendered bytes; clipping styled output is a
+  host concern unless the host implements `render_line_ex` carefully.
+- Mouse support, multi-document switching, semantic jumps, filters, and appended
+  line highlighting are intentionally host-owned or deferred.
+- Follow mode polls through `refresh`; paige does not watch files itself.
 
 ## Keys
 `q` quit · `j`/`k`/`↑`/`↓` line · space/`f`/`b` page · `d`/`u` half-page ·

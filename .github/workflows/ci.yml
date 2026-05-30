@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: pipx install clang-format==19.1.7
-      - run: clang-format --dry-run -Werror src/*.c src/*.h include/*.h
+      - run: clang-format --dry-run -Werror src/*.c src/*.h include/*.h bench/*.c examples/*.c
 
   build:
     strategy:
@@ -31,6 +31,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build (warnings are errors)
         run: make CFLAGS="-std=c11 -O2 -Werror"
+      - name: Build examples
+        run: make examples CFLAGS="-std=c11 -O2 -Werror"
       - name: Test
         run: make test
 
@@ -44,7 +46,16 @@ jobs:
           usesh: true
           run: |
             make CFLAGS="-std=c11 -O2 -Werror"
+            make examples CFLAGS="-std=c11 -O2 -Werror"
             make test
+
+  benchmark-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Benchmark script smoke test
+        run: make bench-smoke
 
   sanitizers:
     runs-on: ubuntu-latest
@@ -58,7 +69,7 @@ jobs:
 
   all-jobs:
     if: always()
-    needs: [lint, build, freebsd, sanitizers]
+    needs: [lint, build, freebsd, sanitizers, benchmark-smoke]
     runs-on: ubuntu-latest
     steps:
       - run: |

@@ -32,6 +32,11 @@ build/demo.o: src/demo.c include/paige.h
 paige-demo: build/demo.o build/libpaige.a
 	$(CC) $(CFLAGS) $(FEATURE) -o paige-demo build/demo.o build/libpaige.a
 
+examples/memory: examples/memory.c include/paige.h build/libpaige.a
+	$(CC) $(ALLCFLAGS) -o examples/memory examples/memory.c build/libpaige.a
+
+examples: examples/memory
+
 test: paige-demo
 	sh tests/run.sh
 
@@ -39,9 +44,9 @@ bench-smoke: paige-demo
 	sh bench/pager.sh --smoke
 
 fmt:
-	clang-format -i src/*.c src/*.h include/*.h
+	clang-format -i src/*.c src/*.h include/*.h bench/*.c examples/*.c
 
 clean:
-	rm -rf build paige-demo tests/build
+	rm -rf build paige-demo tests/build examples/memory
 
-.PHONY: all test bench-smoke fmt clean
+.PHONY: all examples test bench-smoke fmt clean

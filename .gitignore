@@ -3,6 +3,7 @@
 /tests/build/
 /bench/build/
 /bench/.fixtures/
+/examples/memory
 *.o
 *.a
 *.swp
