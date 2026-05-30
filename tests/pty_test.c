@@ -59,7 +59,7 @@ static int has(const char *hay, const char *needle)
 int main(void)
 {
     signal(SIGALRM, on_alarm);
-    alarm(15); /* never hang CI */
+    alarm(20); /* never hang CI */
 
     /* Shorten the digit-goto entry timeout so the goto tests stay fast and the
      * pause/accumulate margins are robust across slow and fast machines. */
@@ -129,10 +129,11 @@ int main(void)
         fails++;
     }
 
-    /* Live incremental goto. The entry timeout is 150ms (PAIGE_GOTO_MS above),
-     * so the 400ms pauses below clear it with a wide margin. The accumulate
-     * case feeds both digits in one write, so the second digit beats the
-     * timeout regardless of scheduling. */
+    /* Live incremental goto. PAIGE_GOTO_MS (above) shortens the entry timeout
+     * for speed, but the pauses below are sized past the 600ms DEFAULT so the
+     * test is correct even where that env var does not take effect. The
+     * accumulate case feeds both digits in one write, so the second digit beats
+     * the timeout regardless of scheduling. */
     (void)!write(master, "16", 2);
     read_screen(master, buf, sizeof buf, 300);
     if (!has(buf, "line016") || !has(buf, "line024")) {
@@ -143,14 +144,14 @@ int main(void)
         printf("FAIL: '16' overshot\n");
         fails++;
     }
-    usleep(400 * 1000);                        /* commit the entry */
-    read_screen(master, buf, sizeof buf, 150); /* drain to a clean buffer */
+    usleep(800 * 1000);                        /* > default timeout: commit */
+    read_screen(master, buf, sizeof buf, 200); /* drain to a clean buffer */
 
     /* a pause longer than the timeout commits the first number and starts a new
      * one: "1" <pause> "6" lands on line 6, not line 16. */
     (void)!write(master, "1", 1);
-    read_screen(master, buf, sizeof buf, 120); /* shorter than the 150ms entry */
-    usleep(400 * 1000);                        /* exceed it: commit "1" */
+    read_screen(master, buf, sizeof buf, 200);
+    usleep(800 * 1000); /* exceed the entry timeout: commit "1" */
     (void)!write(master, "6", 1);
     read_screen(master, buf, sizeof buf, 300);
     if (!has(buf, "line006") || !has(buf, "line014")) {
@@ -161,8 +162,8 @@ int main(void)
         printf("FAIL: paused '1..6' wrongly accumulated to 16\n");
         fails++;
     }
-    usleep(400 * 1000); /* commit before the quit test */
-    read_screen(master, buf, sizeof buf, 150);
+    usleep(800 * 1000); /* commit before the quit test */
+    read_screen(master, buf, sizeof buf, 200);
 
     (void)!write(master, "q", 1); /* quit */
     /* Drain remaining output so the child never blocks on a full pty buffer. */
