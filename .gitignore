@@ -5,7 +5,4 @@
 *.a
 *.swp
 .DS_Store
-
-# Cloned third-party reference source (see .docs/HANDOFF.md §8); the handoff
-# and audit markdown under .docs/ is tracked, but refs/ is local-only.
-/.docs/refs/
+/.docs/
