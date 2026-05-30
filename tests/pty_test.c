@@ -251,7 +251,71 @@ int main(void)
         }
     }
     close(master);
+
+    unsetenv("PAIGE_NO_RAW");
+    setenv("PAIGE_CHOP", "1", 1);
+    char chop_tmpl[] = "/tmp/paige_chop_XXXXXX";
+    int cfd = mkstemp(chop_tmpl);
+    if (cfd < 0) {
+        perror("mkstemp");
+        unlink(tmpl);
+        return 1;
+    }
+    const char *prefix =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-END";
+    (void)!write(cfd, prefix, strlen(prefix));
+    for (int i = 0; i < 500; i++)
+        (void)!write(cfd, "X", 1);
+    const char *tail = "\nsecond-line\nthird-line\n";
+    (void)!write(cfd, tail, strlen(tail));
+    close(cfd);
+
+    pid = forkpty(&master, NULL, NULL, &ws);
+    if (pid < 0) {
+        perror("forkpty");
+        unlink(tmpl);
+        unlink(chop_tmpl);
+        return 1;
+    }
+    if (pid == 0) {
+        execl("./paige-demo", "paige-demo", chop_tmpl, (char *)NULL);
+        _exit(127);
+    }
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "second-line") || !pty_has(buf, ">")) {
+        printf("FAIL: chop mode should show one row per logical line\n");
+        fails++;
+    }
+    pty_send(master, "\x1b[C", 3);
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "col 9") || !pty_has(buf, "<")) {
+        printf("FAIL: right arrow did not horizontally scroll\n");
+        fails++;
+    }
+    pty_send(master, "\x1b[D", 3);
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "col 1")) {
+        printf("FAIL: left arrow did not return to column 1\n");
+        fails++;
+    }
+    pty_send_text(master, "/xyz-END\n");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "col 29") || !pty_has(buf, "\x1b[7mxyz-END")) {
+        printf("FAIL: chop search did not reveal off-screen match\n");
+        fails++;
+    }
+    pty_send_text(master, "q");
+    pty_drain(master, buf, sizeof buf, 300);
+    if (waitpid(pid, &status, WNOHANG) == 0) {
+        pty_drain(master, buf, sizeof buf, 300);
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(pid, SIGTERM);
+            waitpid(pid, &status, 0);
+        }
+    }
+    close(master);
     unlink(tmpl);
+    unlink(chop_tmpl);
 
     if (fails == 0) {
         printf("pty: pager nav/search/goto/quit OK\n");

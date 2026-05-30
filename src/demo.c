@@ -142,6 +142,14 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
         qsort(matches, nmatches, sizeof *matches, match_cmp);
     }
 
+    if ((req->flags & PAIGE_RENDER_CHOP) != 0) {
+        size_t off = req->hscroll < len ? req->hscroll : len;
+        size_t chunk = len - off < (size_t)width ? len - off : (size_t)width;
+        emit_highlighted(sink, d->data + start + off, off, chunk, matches,
+                         nmatches);
+        return 1;
+    }
+
     int segs = 0;
     for (size_t i = 0; i < len; i += (size_t)width) {
         size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
@@ -236,6 +244,8 @@ int main(int argc, char **argv)
         doc.raw_line = NULL;
     paige_stats stats = {0};
     paige_opts opts = { .quit_if_one_screen = 1 };
+    if (getenv("PAIGE_CHOP"))
+        opts.chop_long_lines = 1;
     const char *show_stats = getenv("PAIGE_STATS");
     if (show_stats)
         opts.stats = &stats;
@@ -250,9 +260,10 @@ int main(int argc, char **argv)
     if (show_stats) {
         fprintf(stderr,
                 "paige-stats: render=%llu frames=%llu rows=%llu bytes=%llu "
-                "writes=%llu search_lines=%llu\n",
+                "writes=%llu search_lines=%llu hscroll=%llu\n",
                 stats.render_calls, stats.frames, stats.rows_drawn,
-                stats.bytes_emitted, stats.writes, stats.search_lines);
+                stats.bytes_emitted, stats.writes, stats.search_lines,
+                stats.hscroll_moves);
     }
     free(d.data);
     free(d.line);
