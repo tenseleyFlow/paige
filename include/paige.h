@@ -39,6 +39,7 @@ typedef struct paige_doc {
 
 typedef struct paige_opts {
     int quit_if_one_screen; /* if nonzero, just print and return when it fits */
+    int goto_pause_ms;      /* digit-goto entry timeout; <=0 uses the default */
 } paige_opts;
 
 /*

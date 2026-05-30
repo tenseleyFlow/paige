@@ -255,9 +255,14 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
     struct view v = {doc, &sl, t.cols, 0, 0, -1};
     struct outbuf o = {0};
 
-    /* ~600ms between digits: longer pauses commit the running number and start
-     * a fresh one, so "1<pause>6" lands on 6 while "16" lands on sixteen. */
-    enum { GOTO_PAUSE_MS = 600, GOTO_MAX = 1000000000L };
+    /* Pause between digits: a wait longer than this commits the running number
+     * and starts a fresh one, so "1<pause>6" lands on 6 while "16" lands on
+     * sixteen. ~600ms by default; the client may override (tests use a short
+     * value for speed). */
+    enum { GOTO_PAUSE_DEFAULT_MS = 600, GOTO_MAX = 1000000000L };
+    int goto_pause_ms = GOTO_PAUSE_DEFAULT_MS;
+    if (opts && opts->goto_pause_ms > 0)
+        goto_pause_ms = opts->goto_pause_ms;
 
     for (;;) {
         draw(&v, &t, &o);
@@ -283,7 +288,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
                 v.pending = acc;
                 draw(&v, &t, &o);
                 (void)!write(t.out_fd, o.p, o.len);
-                k = paige_term_key_timed(&t, GOTO_PAUSE_MS);
+                k = paige_term_key_timed(&t, goto_pause_ms);
             } while (k == PK_DIGIT);
             v.pending = -1;
             if (k == PK_TIMEOUT)

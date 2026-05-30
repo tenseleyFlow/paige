@@ -197,7 +197,7 @@ int paige_term_key(struct paige_term *t)
 int paige_term_key_timed(struct paige_term *t, int timeout_ms)
 {
     for (;;) {
-        struct pollfd p = { t->tty_fd, POLLIN, 0 };
+        struct pollfd p = {t->tty_fd, POLLIN, 0};
         int pr = poll(&p, 1, timeout_ms);
         if (pr == 0)
             return PK_TIMEOUT;

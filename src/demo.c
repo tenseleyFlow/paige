@@ -95,7 +95,7 @@ int main(int argc, char **argv)
 {
     const char *path = argc > 1 ? argv[1] : NULL;
     if (path == NULL && isatty(STDIN_FILENO)) {
-        fprintf(stderr, "usage: paige-demo FILE   (or pipe content on stdin)\n");
+        fprintf(stderr, "usage: paige-demo FILE (or pipe content on stdin)\n");
         return 2;
     }
     struct doc d;
@@ -109,7 +109,11 @@ int main(int argc, char **argv)
     index_lines(&d);
 
     paige_doc doc = {&d, render_line, d.title};
-    paige_opts opts = {1};
+    paige_opts opts = {1, 0};
+    /* PAIGE_GOTO_MS lets the PTY test tune the digit-goto timeout. */
+    const char *gms = getenv("PAIGE_GOTO_MS");
+    if (gms)
+        opts.goto_pause_ms = atoi(gms);
     if (paige_run(&doc, &opts) < 0) {
         /* No terminal: dump plainly. */
         (void)!write(STDOUT_FILENO, d.data, d.size);

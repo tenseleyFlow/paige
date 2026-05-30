@@ -61,6 +61,10 @@ int main(void)
     signal(SIGALRM, on_alarm);
     alarm(15); /* never hang CI */
 
+    /* Shorten the digit-goto entry timeout so the goto tests stay fast and the
+     * pause/accumulate margins are robust across slow and fast machines. */
+    setenv("PAIGE_GOTO_MS", "150", 1);
+
     char tmpl[] = "/tmp/paige_pty_XXXXXX";
     int fd = mkstemp(tmpl);
     if (fd < 0) {
@@ -125,9 +129,12 @@ int main(void)
         fails++;
     }
 
-    /* live incremental goto: digits accumulate while typed quickly. */
+    /* Live incremental goto. The entry timeout is 150ms (PAIGE_GOTO_MS above),
+     * so the 400ms pauses below clear it with a wide margin. The accumulate
+     * case feeds both digits in one write, so the second digit beats the
+     * timeout regardless of scheduling. */
     (void)!write(master, "16", 2);
-    read_screen(master, buf, sizeof buf, 400);
+    read_screen(master, buf, sizeof buf, 300);
     if (!has(buf, "line016") || !has(buf, "line024")) {
         printf("FAIL: '16' did not jump to line 16\n");
         fails++;
@@ -136,14 +143,16 @@ int main(void)
         printf("FAIL: '16' overshot\n");
         fails++;
     }
+    usleep(400 * 1000);                        /* commit the entry */
+    read_screen(master, buf, sizeof buf, 150); /* drain to a clean buffer */
 
-    /* a pause longer than the entry timeout commits the first number and starts
-     * a new one: "1" <pause> "6" lands on line 6, not line 16. */
+    /* a pause longer than the timeout commits the first number and starts a new
+     * one: "1" <pause> "6" lands on line 6, not line 16. */
     (void)!write(master, "1", 1);
-    read_screen(master, buf, sizeof buf, 250);
-    usleep(800 * 1000); /* exceed the ~600ms digit-entry timeout */
+    read_screen(master, buf, sizeof buf, 120); /* shorter than the 150ms entry */
+    usleep(400 * 1000);                        /* exceed it: commit "1" */
     (void)!write(master, "6", 1);
-    read_screen(master, buf, sizeof buf, 400);
+    read_screen(master, buf, sizeof buf, 300);
     if (!has(buf, "line006") || !has(buf, "line014")) {
         printf("FAIL: paused '1..6' should land on line 6\n");
         fails++;
@@ -152,6 +161,8 @@ int main(void)
         printf("FAIL: paused '1..6' wrongly accumulated to 16\n");
         fails++;
     }
+    usleep(400 * 1000); /* commit before the quit test */
+    read_screen(master, buf, sizeof buf, 150);
 
     (void)!write(master, "q", 1); /* quit */
     /* Drain remaining output so the child never blocks on a full pty buffer. */

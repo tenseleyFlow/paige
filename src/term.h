@@ -31,7 +31,7 @@ enum paige_key {
     PK_HALFDOWN,
     PK_TOP,
     PK_BOTTOM,
-    PK_DIGIT,   /* a digit was typed; value in t->digit */
+    PK_DIGIT, /* a digit was typed; value in t->digit */
     PK_RESIZE,
     PK_TIMEOUT, /* paige_term_key_timed: no key within the deadline */
     PK_OTHER
