@@ -1,0 +1,7 @@
+/build/
+/paige-demo
+/tests/build/
+*.o
+*.a
+*.swp
+.DS_Store
