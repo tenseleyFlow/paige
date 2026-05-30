@@ -41,6 +41,7 @@ enum paige_key {
     PK_MARK_JUMP,
     PK_HELP,
     PK_FOLLOW,
+    PK_PERF,
     PK_LEFT,
     PK_RIGHT,
     PK_HOME,

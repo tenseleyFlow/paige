@@ -234,6 +234,22 @@ int main(void)
         fails++;
     }
 
+    pty_send_text(master, "P");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "paige performance") || !pty_has(buf, "render:") ||
+        !pty_has(buf, "terminal:")) {
+        printf("FAIL: performance panel did not open\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "q");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "line001") || pty_has(buf, "paige performance")) {
+        printf("FAIL: performance panel did not return to saved view\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
     /* Live incremental goto. PAIGE_GOTO_MS (above) shortens the entry timeout
      * for speed, but the pauses below are sized past the 600ms DEFAULT so the
      * test is correct even where that env var does not take effect. The

@@ -188,6 +188,7 @@ struct view {
     bool chop;
     size_t hscroll;
     bool follow;
+    unsigned long long follow_updates;
     size_t L;     /* top logical line */
     int S;        /* top visual segment within L */
     long pending; /* number being typed for goto, or -1 when not entering */
@@ -699,6 +700,7 @@ static bool follow_refresh(struct view *v, int body)
         return false;
     if (v->stats)
         v->stats->follow_updates++;
+    v->follow_updates++;
     goto_bottom(v, body);
     return true;
 }
@@ -852,6 +854,81 @@ static int static_render_line(void *ctx, size_t L, int width, paige_sink *sink)
     return segs;
 }
 
+static void static_doc_enter(struct view *v, struct paige_term *t,
+                             struct outbuf *o, const char *title,
+                             const char *const *lines, size_t nlines)
+{
+    struct static_doc sd = {lines, nlines};
+    paige_doc static_doc = { .ctx = &sd,
+                             .render_line = static_render_line,
+                             .title = title };
+    struct search_state static_search = {0};
+    struct view sv = { .doc = &static_doc,
+                       .sl = v->sl,
+                       .width = t->cols,
+                       .chop = false,
+                       .hscroll = 0,
+                       .L = 0,
+                       .S = 0,
+                       .pending = -1,
+                       .stats = v->stats,
+                       .search = &static_search };
+
+    for (;;) {
+        draw(&sv, t, o);
+        write_counted(t->out_fd, o->p, o->len, v->stats);
+
+        int key = paige_term_key(t);
+        int body = t->rows - 1;
+        switch (key) {
+        case PK_QUIT:
+        case PK_ESC:
+        case PK_HELP:
+        case PK_PERF:
+            return;
+        case PK_DOWN:
+            view_clear_message(&sv);
+            move_down(&sv, 1);
+            break;
+        case PK_UP:
+            view_clear_message(&sv);
+            move_up(&sv, 1);
+            break;
+        case PK_PGDN:
+            view_clear_message(&sv);
+            move_down(&sv, body);
+            break;
+        case PK_PGUP:
+            view_clear_message(&sv);
+            move_up(&sv, body);
+            break;
+        case PK_HALFDOWN:
+            view_clear_message(&sv);
+            move_down(&sv, body / 2);
+            break;
+        case PK_HALFUP:
+            view_clear_message(&sv);
+            move_up(&sv, body / 2);
+            break;
+        case PK_TOP:
+            view_clear_message(&sv);
+            sv.L = 0;
+            sv.S = 0;
+            break;
+        case PK_BOTTOM:
+            view_clear_message(&sv);
+            goto_bottom(&sv, body);
+            break;
+        case PK_RESIZE:
+            sv.width = t->cols;
+            break;
+        default:
+            view_set_message(&sv, "q or Esc returns");
+            break;
+        }
+    }
+}
+
 static void help_enter(struct view *v, struct paige_term *t, struct outbuf *o)
 {
     static const char *const help_lines[] = {
@@ -875,6 +952,9 @@ static void help_enter(struct view *v, struct paige_term *t, struct outbuf *o)
         "  ''                 previous position",
         "  '^, '$, '.         top, bottom, current line",
         "",
+        "Performance:",
+        "  P                  open performance panel",
+        "",
         "Chop mode:",
         "  left/right arrows  horizontal scroll",
         "",
@@ -882,75 +962,46 @@ static void help_enter(struct view *v, struct paige_term *t, struct outbuf *o)
         "  h                  open this help",
         "  q or Esc           return",
     };
-    struct static_doc hd = {help_lines,
-                            sizeof help_lines / sizeof help_lines[0]};
-    paige_doc help_doc = { .ctx = &hd,
-                           .render_line = static_render_line,
-                           .title = "paige help" };
-    struct search_state help_search = {0};
-    struct view hv = { .doc = &help_doc,
-                       .sl = v->sl,
-                       .width = t->cols,
-                       .chop = false,
-                       .hscroll = 0,
-                       .L = 0,
-                       .S = 0,
-                       .pending = -1,
-                       .stats = v->stats,
-                       .search = &help_search };
+    static_doc_enter(v, t, o, "paige help", help_lines,
+                     sizeof help_lines / sizeof help_lines[0]);
+}
 
-    for (;;) {
-        draw(&hv, t, o);
-        write_counted(t->out_fd, o->p, o->len, v->stats);
-
-        int key = paige_term_key(t);
-        int body = t->rows - 1;
-        switch (key) {
-        case PK_QUIT:
-        case PK_ESC:
-        case PK_HELP:
-            return;
-        case PK_DOWN:
-            view_clear_message(&hv);
-            move_down(&hv, 1);
-            break;
-        case PK_UP:
-            view_clear_message(&hv);
-            move_up(&hv, 1);
-            break;
-        case PK_PGDN:
-            view_clear_message(&hv);
-            move_down(&hv, body);
-            break;
-        case PK_PGUP:
-            view_clear_message(&hv);
-            move_up(&hv, body);
-            break;
-        case PK_HALFDOWN:
-            view_clear_message(&hv);
-            move_down(&hv, body / 2);
-            break;
-        case PK_HALFUP:
-            view_clear_message(&hv);
-            move_up(&hv, body / 2);
-            break;
-        case PK_TOP:
-            view_clear_message(&hv);
-            hv.L = 0;
-            hv.S = 0;
-            break;
-        case PK_BOTTOM:
-            view_clear_message(&hv);
-            goto_bottom(&hv, body);
-            break;
-        case PK_RESIZE:
-            hv.width = t->cols;
-            break;
-        default:
-            view_set_message(&hv, "q or Esc returns");
-            break;
-        }
+static void perf_enter(struct view *v, struct paige_term *t, struct outbuf *o)
+{
+    char pos[96], render[96], output[96], search[96], follow[96], hint[96];
+    const char *lines[16];
+    size_t n = 0;
+    lines[n++] = "paige performance";
+    lines[n++] = "";
+    snprintf(pos, sizeof pos, "view: line=%zu segment=%d hscroll=%zu follow=%s",
+             v->L + 1, v->S, v->hscroll + 1, v->follow ? "yes" : "no");
+    lines[n++] = pos;
+    if (v->stats) {
+        snprintf(render, sizeof render,
+                 "render: calls=%llu frames=%llu rows=%llu",
+                 v->stats->render_calls, v->stats->frames,
+                 v->stats->rows_drawn);
+        snprintf(output, sizeof output, "terminal: writes=%llu bytes=%llu",
+                 v->stats->writes, v->stats->bytes_emitted);
+        snprintf(search, sizeof search,
+                 "search: scanned_lines=%llu hscroll_moves=%llu",
+                 v->stats->search_lines, v->stats->hscroll_moves);
+        snprintf(follow, sizeof follow,
+                 "follow: refreshes=%llu updates=%llu",
+                 v->stats->follow_refreshes, v->stats->follow_updates);
+        lines[n++] = render;
+        lines[n++] = output;
+        lines[n++] = search;
+        lines[n++] = follow;
+    } else {
+        lines[n++] = "stats unavailable: pass paige_opts.stats to collect counters";
     }
+    lines[n++] = "";
+    snprintf(hint, sizeof hint, "bench: run sh bench/pager.sh --help");
+    lines[n++] = hint;
+    lines[n++] = "q or Esc returns";
+
+    static_doc_enter(v, t, o, "paige performance", lines, n);
 }
 
 /* Render the visible screen into `o`; returns true if the bottom (EOF) shows.
@@ -1014,12 +1065,21 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
         snprintf(num, sizeof num, "  %s ", v->message);
     else if (v->search && v->search->message[0])
         snprintf(num, sizeof num, "  %s ", v->search->message);
+    else if (v->follow && v->chop && v->follow_updates == 0)
+        snprintf(num, sizeof num,
+                 "  line %zu  col %zu  (FOLLOW waiting)%s ", v->L + 1,
+                 v->hscroll + 1, at_eof ? "  (END)" : "");
     else if (v->follow && v->chop)
-        snprintf(num, sizeof num, "  line %zu  col %zu  (FOLLOW)%s ",
-                 v->L + 1, v->hscroll + 1, at_eof ? "  (END)" : "");
-    else if (v->follow)
-        snprintf(num, sizeof num, "  line %zu  (FOLLOW)%s ", v->L + 1,
+        snprintf(num, sizeof num,
+                 "  line %zu  col %zu  (FOLLOW updates %llu)%s ",
+                 v->L + 1, v->hscroll + 1, v->follow_updates,
                  at_eof ? "  (END)" : "");
+    else if (v->follow && v->follow_updates == 0)
+        snprintf(num, sizeof num, "  line %zu  (FOLLOW waiting)%s ",
+                 v->L + 1, at_eof ? "  (END)" : "");
+    else if (v->follow)
+        snprintf(num, sizeof num, "  line %zu  (FOLLOW updates %llu)%s ",
+                 v->L + 1, v->follow_updates, at_eof ? "  (END)" : "");
     else if (v->chop)
         snprintf(num, sizeof num, "  line %zu  col %zu%s ", v->L + 1,
                  v->hscroll + 1, at_eof ? "  (END)" : "");
@@ -1201,6 +1261,11 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
             follow_pause(&v);
             view_clear_message(&v);
             help_enter(&v, &t, &o);
+            break;
+        case PK_PERF:
+            follow_pause(&v);
+            view_clear_message(&v);
+            perf_enter(&v, &t, &o);
             break;
         case PK_SEARCH_FWD:
             follow_pause(&v);

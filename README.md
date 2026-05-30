@@ -68,7 +68,8 @@ manual and fixture-backed; normal CI/test runs stay fast.
 `q` quit · `j`/`k`/`↑`/`↓` line · space/`f`/`b` page · `d`/`u` half-page ·
 `g`/`G` top/bottom · `/`/`?` search · `n`/`N` repeat search · `m<char>` set
 mark · `'<char>` jump to mark · `''` previous position · `F` follow live content
-until manual navigation · `h` help · `←`/`→` horizontal scroll in chop mode ·
+until manual navigation · `P` performance panel · `h` help · `←`/`→`
+horizontal scroll in chop mode ·
 digits jump to a line as you type — the view follows each keystroke (`1`,`6` →
 line 16), and a pause longer than ~600ms commits the number and starts a fresh
 one (`1` … `6` → line 6). End a number with `%` to jump to that percentage when

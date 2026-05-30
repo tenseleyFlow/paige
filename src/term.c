@@ -205,6 +205,8 @@ int paige_term_decode_command_byte(struct paige_term *t, unsigned char c)
         return PK_HELP;
     case 'F':
         return PK_FOLLOW;
+    case 'P':
+        return PK_PERF;
     case ' ':
     case 'f':
         return PK_PGDN;

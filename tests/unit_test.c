@@ -48,6 +48,8 @@ static void test_command_decode(void)
               PK_HELP);
     check_key("command follow", paige_term_decode_command_byte(&t, 'F'),
               PK_FOLLOW);
+    check_key("command perf", paige_term_decode_command_byte(&t, 'P'),
+              PK_PERF);
     check_key("command page down", paige_term_decode_command_byte(&t, ' '),
               PK_PGDN);
     check_key("command top", paige_term_decode_command_byte(&t, 'g'), PK_TOP);
