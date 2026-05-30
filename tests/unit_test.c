@@ -38,6 +38,14 @@ static void test_command_decode(void)
               PK_SEARCH_NEXT);
     check_key("command search prev", paige_term_decode_command_byte(&t, 'N'),
               PK_SEARCH_PREV);
+    check_key("command percent", paige_term_decode_command_byte(&t, '%'),
+              PK_PERCENT);
+    check_key("command mark set", paige_term_decode_command_byte(&t, 'm'),
+              PK_MARK_SET);
+    check_key("command mark jump", paige_term_decode_command_byte(&t, '\''),
+              PK_MARK_JUMP);
+    check_key("command help", paige_term_decode_command_byte(&t, 'h'),
+              PK_HELP);
     check_key("command page down", paige_term_decode_command_byte(&t, ' '),
               PK_PGDN);
     check_key("command top", paige_term_decode_command_byte(&t, 'g'), PK_TOP);

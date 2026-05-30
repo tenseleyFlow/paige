@@ -87,6 +87,10 @@ typedef struct paige_doc {
      */
     int (*render_line_ex)(void *ctx, const paige_render_req *req,
                           paige_sink *sink);
+
+    /* Optional known logical line count. Enables percentage jumps without
+     * forcing paige to scan an unknown or streaming document to EOF. */
+    int (*line_count)(void *ctx, size_t *out);
 } paige_doc;
 
 typedef struct paige_opts {

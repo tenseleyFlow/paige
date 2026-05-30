@@ -32,6 +32,8 @@ path for upcoming features:
 
 - `raw_line(ctx, lineno, out)` exposes source bytes for search and semantic
   features without inspecting ANSI-rendered output.
+- `line_count(ctx, out)` exposes a known logical line count for percentage jumps;
+  if unset, `%` reports that percent jumps are unavailable.
 - `render_line_ex(ctx, req, sink)` receives a `paige_render_req` with draw context
   such as wrap mode, horizontal offset, and match spans. If unset, paige falls
   back to `render_line`.
@@ -53,10 +55,12 @@ and the BSDs.
 
 ## Keys
 `q` quit · `j`/`k`/`↑`/`↓` line · space/`f`/`b` page · `d`/`u` half-page ·
-`g`/`G` top/bottom · `/`/`?` search · `n`/`N` repeat search · `←`/`→`
+`g`/`G` top/bottom · `/`/`?` search · `n`/`N` repeat search · `m<char>` set
+mark · `'<char>` jump to mark · `''` previous position · `h` help · `←`/`→`
 horizontal scroll in chop mode · digits jump to a line as you type — the view
 follows each keystroke (`1`,`6` → line 16), and a pause longer than ~600ms
-commits the number and starts a fresh one (`1` … `6` → line 6).
+commits the number and starts a fresh one (`1` … `6` → line 6). End a number
+with `%` to jump to that percentage when the host provides `line_count`.
 
 ## License
 MIT — see [LICENSE](LICENSE).

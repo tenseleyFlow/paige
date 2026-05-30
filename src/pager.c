@@ -2,6 +2,7 @@
 #include "search.h"
 #include "term.h"
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -134,7 +135,13 @@ static void write_counted(int fd, const char *s, size_t n, paige_stats *stats)
 
 /* ---- scroll position helpers (logical line L, visual segment S) ---- */
 
-enum { SEARCH_MAX = 256, SEARCH_STATUS_MAX = 96, SEARCH_MATCH_MAX = 64 };
+enum {
+    SEARCH_MAX = 256,
+    SEARCH_STATUS_MAX = 96,
+    SEARCH_MATCH_MAX = 64,
+    STATUS_MAX = 96,
+    MARK_COUNT = 256,
+};
 
 enum search_dir {
     SEARCH_FORWARD = 1,
@@ -163,6 +170,17 @@ struct search_state {
     char message[SEARCH_STATUS_MAX];
 };
 
+struct view_pos {
+    size_t L;
+    int S;
+    size_t hscroll;
+};
+
+struct mark {
+    bool set;
+    struct view_pos pos;
+};
+
 struct view {
     const paige_doc *doc;
     struct seglist *sl;
@@ -174,12 +192,10 @@ struct view {
     long pending; /* number being typed for goto, or -1 when not entering */
     paige_stats *stats;
     struct search_state *search;
-};
-
-struct view_pos {
-    size_t L;
-    int S;
-    size_t hscroll;
+    char message[STATUS_MAX];
+    struct mark marks[MARK_COUNT];
+    bool previous_set;
+    struct view_pos previous;
 };
 
 static bool draw(struct view *v, struct paige_term *t, struct outbuf *o);
@@ -196,6 +212,19 @@ static void view_restore(struct view *v, const struct view_pos *pos)
     v->L = pos->L;
     v->S = pos->S;
     v->hscroll = pos->hscroll;
+}
+
+static bool view_pos_equal(const struct view_pos *a, const struct view *v)
+{
+    return a->L == v->L && a->S == v->S && a->hscroll == v->hscroll;
+}
+
+static void view_note_previous(struct view *v, const struct view_pos *origin)
+{
+    if (view_pos_equal(origin, v))
+        return;
+    v->previous = *origin;
+    v->previous_set = true;
 }
 
 static int view_content_width(const struct view *v)
@@ -220,6 +249,20 @@ static void search_clear_message(struct search_state *s)
 {
     if (s)
         s->message[0] = '\0';
+}
+
+static void view_set_message(struct view *v, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(v->message, sizeof v->message, fmt, ap);
+    va_end(ap);
+}
+
+static void view_clear_message(struct view *v)
+{
+    v->message[0] = '\0';
+    search_clear_message(v->search);
 }
 
 static const char *search_pattern(const struct search_state *s, size_t *len)
@@ -370,14 +413,16 @@ static void search_not_found(struct view *v)
              "pattern not found");
 }
 
-static void search_run_from(struct view *v, int dir, size_t start_L,
+static bool search_run_from(struct view *v, int dir, size_t start_L,
                             size_t boundary)
 {
     struct search_hit hit;
-    if (search_doc(v, dir, start_L, boundary, &hit))
+    if (search_doc(v, dir, start_L, boundary, &hit)) {
         search_activate(v, &hit);
-    else
-        search_not_found(v);
+        return true;
+    }
+    search_not_found(v);
+    return false;
 }
 
 static void search_refresh_entry(struct view *v,
@@ -459,6 +504,8 @@ static int search_enter(struct view *v, struct paige_term *t, struct outbuf *o,
                 v->search->entering = false;
                 if (!found)
                     memcpy(v->search->message, message, sizeof message);
+                else
+                    view_note_previous(v, &origin);
             }
             return PK_NONE;
         }
@@ -487,15 +534,20 @@ static void search_repeat(struct view *v, int dir)
         return;
     }
     search_clear_message(v->search);
+    struct view_pos origin;
+    view_save(v, &origin);
+    bool found;
     if (dir == SEARCH_FORWARD) {
         size_t start_L = v->search->active ? v->search->active_L : v->L;
         size_t start_off = v->search->active ? v->search->active_off + 1 : 0;
-        search_run_from(v, SEARCH_FORWARD, start_L, start_off);
+        found = search_run_from(v, SEARCH_FORWARD, start_L, start_off);
     } else {
         size_t start_L = v->search->active ? v->search->active_L : v->L;
         size_t before = v->search->active ? v->search->active_off : (size_t)-1;
-        search_run_from(v, SEARCH_BACKWARD, start_L, before);
+        found = search_run_from(v, SEARCH_BACKWARD, start_L, before);
     }
+    if (found)
+        view_note_previous(v, &origin);
 }
 
 static size_t collect_matches(struct view *v, size_t L, paige_match *matches,
@@ -574,9 +626,9 @@ static void move_up(struct view *v, int k)
 /* Jump so logical line N (1-based) is at the top, clamped to the last line.
  * Lazy: rendering line N-1 builds the index only that far; a number past EOF
  * walks forward to the final existing line (rare, only on overshoot). */
-static void goto_line(struct view *v, unsigned long n)
+static void goto_line(struct view *v, size_t n)
 {
-    size_t target = n > 0 ? (size_t)(n - 1) : 0;
+    size_t target = n > 0 ? n - 1 : 0;
     if (segcount(v, target) == 0) {
         /* past EOF: settle on the last line that exists */
         size_t last = 0;
@@ -586,6 +638,50 @@ static void goto_line(struct view *v, unsigned long n)
     }
     v->L = target;
     v->S = 0;
+}
+
+static void view_clamp(struct view *v)
+{
+    int n = segcount(v, v->L);
+    if (n == 0) {
+        v->L = 0;
+        v->S = 0;
+        return;
+    }
+    if (v->S < 0)
+        v->S = 0;
+    if (v->S >= n)
+        v->S = n - 1;
+}
+
+static size_t percent_target(size_t count, unsigned long pct)
+{
+    if (pct > 100)
+        pct = 100;
+    size_t last = count - 1;
+    return (last / 100) * pct + ((last % 100) * pct) / 100;
+}
+
+static bool goto_percent(struct view *v, unsigned long pct)
+{
+    size_t count = 0;
+    if (!v->doc->line_count || !v->doc->line_count(v->doc->ctx, &count) ||
+        count == 0) {
+        view_set_message(v, "percent unavailable");
+        return false;
+    }
+    goto_line(v, percent_target(count, pct) + 1);
+    return true;
+}
+
+static void goto_bottom(struct view *v, int body)
+{
+    while (segcount(v, v->L + 1) != 0)
+        v->L++;
+    v->S = segcount(v, v->L) - 1;
+    if (v->S < 0)
+        v->S = 0;
+    move_up(v, body - 1);
 }
 
 static void move_left(struct view *v, size_t cols)
@@ -609,6 +705,216 @@ static void move_right(struct view *v, size_t cols)
         v->stats->hscroll_moves++;
     v->hscroll += cols;
     v->S = 0;
+}
+
+static void jump_to_pos(struct view *v, const struct view_pos *pos)
+{
+    struct view_pos origin;
+    view_save(v, &origin);
+    view_restore(v, pos);
+    view_clamp(v);
+    view_note_previous(v, &origin);
+}
+
+static void mark_set(struct view *v, unsigned char mark)
+{
+    view_save(v, &v->marks[mark].pos);
+    v->marks[mark].set = true;
+    view_set_message(v, "mark %c set", mark);
+}
+
+static void mark_jump(struct view *v, unsigned char mark, int body)
+{
+    if (mark == '\'') {
+        if (v->previous_set)
+            jump_to_pos(v, &v->previous);
+        else
+            view_set_message(v, "no previous position");
+        return;
+    }
+    if (mark == '^') {
+        struct view_pos origin;
+        view_save(v, &origin);
+        v->L = 0;
+        v->S = 0;
+        view_note_previous(v, &origin);
+        return;
+    }
+    if (mark == '$') {
+        struct view_pos origin;
+        view_save(v, &origin);
+        goto_bottom(v, body);
+        view_note_previous(v, &origin);
+        return;
+    }
+    if (mark == '.') {
+        view_set_message(v, "line %zu", v->L + 1);
+        return;
+    }
+    if (!v->marks[mark].set) {
+        view_set_message(v, "mark %c not set", mark);
+        return;
+    }
+    jump_to_pos(v, &v->marks[mark].pos);
+}
+
+static int mark_enter(struct view *v, struct paige_term *t, struct outbuf *o,
+                      bool set, int body)
+{
+    for (;;) {
+        view_set_message(v, set ? "set mark" : "jump to mark");
+        draw(v, t, o);
+        write_counted(t->out_fd, o->p, o->len, v->stats);
+
+        int key = paige_term_key_input(t);
+        if (key == PK_RESIZE) {
+            v->width = t->cols;
+            continue;
+        }
+        if (key == PK_QUIT)
+            return PK_QUIT;
+        if (key == PK_ESC) {
+            v->message[0] = '\0';
+            return PK_NONE;
+        }
+        if (key != PK_CHAR) {
+            view_set_message(v, "mark cancelled");
+            return PK_NONE;
+        }
+        if (set)
+            mark_set(v, t->ch);
+        else
+            mark_jump(v, t->ch, body);
+        return PK_NONE;
+    }
+}
+
+struct static_doc {
+    const char *const *lines;
+    size_t nlines;
+};
+
+static int static_render_line(void *ctx, size_t L, int width, paige_sink *sink)
+{
+    struct static_doc *d = ctx;
+    if (L >= d->nlines)
+        return 0;
+    if (width < 1)
+        width = 1;
+    const char *line = d->lines[L];
+    size_t len = strlen(line);
+    if (len == 0) {
+        paige_emit(sink, "", 0);
+        return 1;
+    }
+    int segs = 0;
+    for (size_t i = 0; i < len; i += (size_t)width) {
+        size_t chunk = len - i < (size_t)width ? len - i : (size_t)width;
+        paige_emit(sink, line + i, chunk);
+        segs++;
+    }
+    return segs;
+}
+
+static void help_enter(struct view *v, struct paige_term *t, struct outbuf *o)
+{
+    static const char *const help_lines[] = {
+        "paige help",
+        "",
+        "Navigation:",
+        "  j/k or arrows      scroll one row",
+        "  space/f, b         page down/up",
+        "  d/u                half-page down/up",
+        "  g/G                top/bottom",
+        "  digits             jump to line as you type",
+        "  digits%            jump to a known percentage",
+        "",
+        "Search:",
+        "  /, ?               forward/backward search",
+        "  n, N               repeat search",
+        "",
+        "Marks:",
+        "  m<char>            set mark",
+        "  '<char>            jump to mark",
+        "  ''                 previous position",
+        "  '^, '$, '.         top, bottom, current line",
+        "",
+        "Chop mode:",
+        "  left/right arrows  horizontal scroll",
+        "",
+        "Help:",
+        "  h                  open this help",
+        "  q or Esc           return",
+    };
+    struct static_doc hd = {help_lines,
+                            sizeof help_lines / sizeof help_lines[0]};
+    paige_doc help_doc = { .ctx = &hd,
+                           .render_line = static_render_line,
+                           .title = "paige help" };
+    struct search_state help_search = {0};
+    struct view hv = { .doc = &help_doc,
+                       .sl = v->sl,
+                       .width = t->cols,
+                       .chop = false,
+                       .hscroll = 0,
+                       .L = 0,
+                       .S = 0,
+                       .pending = -1,
+                       .stats = v->stats,
+                       .search = &help_search };
+
+    for (;;) {
+        draw(&hv, t, o);
+        write_counted(t->out_fd, o->p, o->len, v->stats);
+
+        int key = paige_term_key(t);
+        int body = t->rows - 1;
+        switch (key) {
+        case PK_QUIT:
+        case PK_ESC:
+        case PK_HELP:
+            return;
+        case PK_DOWN:
+            view_clear_message(&hv);
+            move_down(&hv, 1);
+            break;
+        case PK_UP:
+            view_clear_message(&hv);
+            move_up(&hv, 1);
+            break;
+        case PK_PGDN:
+            view_clear_message(&hv);
+            move_down(&hv, body);
+            break;
+        case PK_PGUP:
+            view_clear_message(&hv);
+            move_up(&hv, body);
+            break;
+        case PK_HALFDOWN:
+            view_clear_message(&hv);
+            move_down(&hv, body / 2);
+            break;
+        case PK_HALFUP:
+            view_clear_message(&hv);
+            move_up(&hv, body / 2);
+            break;
+        case PK_TOP:
+            view_clear_message(&hv);
+            hv.L = 0;
+            hv.S = 0;
+            break;
+        case PK_BOTTOM:
+            view_clear_message(&hv);
+            goto_bottom(&hv, body);
+            break;
+        case PK_RESIZE:
+            hv.width = t->cols;
+            break;
+        default:
+            view_set_message(&hv, "q or Esc returns");
+            break;
+        }
+    }
 }
 
 /* Render the visible screen into `o`; returns true if the bottom (EOF) shows.
@@ -659,7 +965,7 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
     ob_str(o, "\x1b[K\x1b[7m ");
     if (v->doc->title)
         ob_str(o, v->doc->title);
-    char num[64];
+    char num[160];
     if (v->pending >= 0)
         snprintf(num, sizeof num, "  :%ld ", v->pending);
     else if (v->search && v->search->entering)
@@ -668,6 +974,8 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
                  (int)v->search->entry_len, v->search->entry,
                  v->search->message[0] ? "  " : "",
                  v->search->message);
+    else if (v->message[0])
+        snprintf(num, sizeof num, "  %s ", v->message);
     else if (v->search && v->search->message[0])
         snprintf(num, sizeof num, "  %s ", v->search->message);
     else if (v->chop)
@@ -734,16 +1042,17 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
 
     paige_term_enter(&t);
     struct search_state search = {0};
-    struct view v = {doc,
-                     &sl,
-                     t.cols,
-                     opts && opts->chop_long_lines && doc->render_line_ex,
-                     0,
-                     0,
-                     0,
-                     -1,
-                     stats,
-                     &search};
+    struct view v = { .doc = doc,
+                      .sl = &sl,
+                      .width = t.cols,
+                      .chop = opts && opts->chop_long_lines &&
+                              doc->render_line_ex,
+                      .hscroll = 0,
+                      .L = 0,
+                      .S = 0,
+                      .pending = -1,
+                      .stats = stats,
+                      .search = &search };
     struct outbuf o = {0};
 
     /* Pause between digits: a wait longer than this commits the running number
@@ -769,19 +1078,29 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
              * immediately; a pause longer than GOTO_PAUSE_MS ends entry. The
              * terminating keystroke (if any) is re-dispatched so "16q" quits
              * and "16j" then scrolls. */
+            view_clear_message(&v);
+            struct view_pos origin;
+            view_save(&v, &origin);
             long acc = 0;
             int k;
             do {
                 acc = acc * 10 + t.digit;
                 if (acc > GOTO_MAX)
                     acc = GOTO_MAX;
-                goto_line(&v, (unsigned long)acc);
+                goto_line(&v, (size_t)acc);
                 v.pending = acc;
                 draw(&v, &t, &o);
                 write_counted(t.out_fd, o.p, o.len, stats);
                 k = paige_term_key_timed(&t, goto_pause_ms);
             } while (k == PK_DIGIT);
             v.pending = -1;
+            if (k == PK_PERCENT) {
+                view_restore(&v, &origin);
+                if (goto_percent(&v, (unsigned long)acc))
+                    view_note_previous(&v, &origin);
+                continue;
+            }
+            view_note_previous(&v, &origin);
             if (k == PK_TIMEOUT)
                 continue; /* paused: commit and wait for the next command */
             key = k;
@@ -789,74 +1108,102 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
         }
         switch (key) {
         case PK_RIGHT:
-            search_clear_message(&search);
+            view_clear_message(&v);
             move_right(&v, 8);
             break;
         case PK_LEFT:
-            search_clear_message(&search);
+            view_clear_message(&v);
             move_left(&v, 8);
             break;
+        case PK_PERCENT:
+            view_set_message(&v, "type digits then %%");
+            break;
+        case PK_MARK_SET:
+            if (mark_enter(&v, &t, &o, true, body) == PK_QUIT)
+                goto done;
+            break;
+        case PK_MARK_JUMP:
+            if (mark_enter(&v, &t, &o, false, body) == PK_QUIT)
+                goto done;
+            break;
+        case PK_HELP:
+            view_clear_message(&v);
+            help_enter(&v, &t, &o);
+            break;
         case PK_SEARCH_FWD:
+            view_clear_message(&v);
             (void)search_enter(&v, &t, &o, SEARCH_FORWARD);
             break;
         case PK_SEARCH_BACK:
+            view_clear_message(&v);
             (void)search_enter(&v, &t, &o, SEARCH_BACKWARD);
             break;
         case PK_SEARCH_NEXT:
+            v.message[0] = '\0';
             search_repeat(&v, search.dir == SEARCH_BACKWARD ? SEARCH_BACKWARD
                                                             : SEARCH_FORWARD);
             break;
         case PK_SEARCH_PREV:
+            v.message[0] = '\0';
             search_repeat(&v, search.dir == SEARCH_BACKWARD ? SEARCH_FORWARD
                                                             : SEARCH_BACKWARD);
             break;
         case PK_DOWN:
-            search_clear_message(&search);
+            view_clear_message(&v);
             move_down(&v, 1);
             break;
         case PK_UP:
-            search_clear_message(&search);
+            view_clear_message(&v);
             move_up(&v, 1);
             break;
         case PK_PGDN:
-            search_clear_message(&search);
+            view_clear_message(&v);
             move_down(&v, body);
             break;
         case PK_PGUP:
-            search_clear_message(&search);
+            view_clear_message(&v);
             move_up(&v, body);
             break;
         case PK_HALFDOWN:
-            search_clear_message(&search);
+            view_clear_message(&v);
             move_down(&v, body / 2);
             break;
         case PK_HALFUP:
-            search_clear_message(&search);
+            view_clear_message(&v);
             move_up(&v, body / 2);
             break;
         case PK_TOP:
-            search_clear_message(&search);
-            v.L = 0;
-            v.S = 0;
+            view_clear_message(&v);
+            {
+                struct view_pos origin;
+                view_save(&v, &origin);
+                v.L = 0;
+                v.S = 0;
+                view_note_previous(&v, &origin);
+            }
             break;
         case PK_BOTTOM:
-            search_clear_message(&search);
-            /* go to end, then back up a screenful */
-            while (segcount(&v, v.L + 1) != 0)
-                v.L++;
-            v.S = segcount(&v, v.L) - 1;
-            if (v.S < 0)
-                v.S = 0;
-            move_up(&v, body - 1);
+            view_clear_message(&v);
+            {
+                struct view_pos origin;
+                view_save(&v, &origin);
+                goto_bottom(&v, body);
+                view_note_previous(&v, &origin);
+            }
             break;
         case PK_RESIZE:
             v.width = t.cols;
+            view_clamp(&v);
+            break;
+        case PK_OTHER:
+            view_set_message(&v, "unknown command");
             break;
         default:
             break;
         }
     }
 
+done:
     paige_term_leave(&t);
     close(t.tty_fd);
     sl_free(&sl);

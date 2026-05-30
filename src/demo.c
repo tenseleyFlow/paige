@@ -171,6 +171,13 @@ static int raw_line(void *ctx, size_t L, paige_line *out)
     return 1;
 }
 
+static int line_count(void *ctx, size_t *out)
+{
+    struct doc *d = ctx;
+    *out = d->nlines;
+    return 1;
+}
+
 static char *slurp(const char *path, size_t *out_size)
 {
     int fd = path ? open(path, O_RDONLY) : STDIN_FILENO;
@@ -239,9 +246,12 @@ int main(int argc, char **argv)
                       .render_line = render_line,
                       .title = d.title,
                       .raw_line = raw_line,
+                      .line_count = line_count,
                       .render_line_ex = render_line_ex };
     if (getenv("PAIGE_NO_RAW"))
         doc.raw_line = NULL;
+    if (getenv("PAIGE_NO_COUNT"))
+        doc.line_count = NULL;
     paige_stats stats = {0};
     paige_opts opts = { .quit_if_one_screen = 1 };
     if (getenv("PAIGE_CHOP"))
