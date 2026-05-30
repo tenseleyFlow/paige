@@ -27,6 +27,17 @@ paige_opts opts = { .quit_if_one_screen = 1 };
 paige_run(&doc, &opts);   // 0 on quit, -1 if there's no terminal
 ```
 
+Optional hooks keep the basic API small while giving richer clients a faster
+path for upcoming features:
+
+- `raw_line(ctx, lineno, out)` exposes source bytes for search and semantic
+  features without inspecting ANSI-rendered output.
+- `render_line_ex(ctx, req, sink)` receives a `paige_render_req` with draw context
+  such as wrap mode, horizontal offset, and match spans. If unset, paige falls
+  back to `render_line`.
+- `paige_opts.stats` can point at a `paige_stats` struct; paige zeroes and fills
+  it with basic render/write counters during `paige_run`.
+
 ## Build
 
 ```sh

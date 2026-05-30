@@ -21,14 +21,25 @@ struct doc {
     const char *title;
 };
 
+static int line_bounds(struct doc *d, size_t L, size_t *start, size_t *len)
+{
+    if (L >= d->nlines)
+        return 0;
+    size_t s = d->line[L];
+    size_t e = (L + 1 < d->nlines) ? d->line[L + 1] : d->size;
+    if (e > s && d->data[e - 1] == '\n')
+        e--;
+    *start = s;
+    *len = e - s;
+    return 1;
+}
+
 static int render_line(void *ctx, size_t L, int width, paige_sink *sink)
 {
     struct doc *d = ctx;
-    if (L >= d->nlines)
+    size_t start, len;
+    if (!line_bounds(d, L, &start, &len))
         return 0;
-    size_t start = d->line[L];
-    size_t end = (L + 1 < d->nlines) ? d->line[L + 1] - 1 : d->size;
-    size_t len = end > start ? end - start : 0;
     if (width < 1)
         width = 1;
     if (len == 0) {
@@ -42,6 +53,27 @@ static int render_line(void *ctx, size_t L, int width, paige_sink *sink)
         segs++;
     }
     return segs;
+}
+
+static int render_line_ex(void *ctx, const paige_render_req *req,
+                          paige_sink *sink)
+{
+    (void)req->flags;
+    (void)req->hscroll;
+    (void)req->matches;
+    (void)req->nmatches;
+    return render_line(ctx, req->lineno, req->width, sink);
+}
+
+static int raw_line(void *ctx, size_t L, paige_line *out)
+{
+    struct doc *d = ctx;
+    size_t start, len;
+    if (!line_bounds(d, L, &start, &len))
+        return 0;
+    out->bytes = d->data + start;
+    out->len = len;
+    return 1;
 }
 
 static char *slurp(const char *path, size_t *out_size)
@@ -108,8 +140,16 @@ int main(int argc, char **argv)
     d.title = path ? path : "stdin";
     index_lines(&d);
 
-    paige_doc doc = {&d, render_line, d.title};
-    paige_opts opts = {1, 0};
+    paige_doc doc = { .ctx = &d,
+                      .render_line = render_line,
+                      .title = d.title,
+                      .raw_line = raw_line,
+                      .render_line_ex = render_line_ex };
+    paige_stats stats = {0};
+    paige_opts opts = { .quit_if_one_screen = 1 };
+    const char *show_stats = getenv("PAIGE_STATS");
+    if (show_stats)
+        opts.stats = &stats;
     /* PAIGE_GOTO_MS lets the PTY test tune the digit-goto timeout. */
     const char *gms = getenv("PAIGE_GOTO_MS");
     if (gms)
@@ -117,6 +157,13 @@ int main(int argc, char **argv)
     if (paige_run(&doc, &opts) < 0) {
         /* No terminal: dump plainly. */
         (void)!write(STDOUT_FILENO, d.data, d.size);
+    }
+    if (show_stats) {
+        fprintf(stderr,
+                "paige-stats: render=%llu frames=%llu rows=%llu bytes=%llu "
+                "writes=%llu\n",
+                stats.render_calls, stats.frames, stats.rows_drawn,
+                stats.bytes_emitted, stats.writes);
     }
     free(d.data);
     free(d.line);

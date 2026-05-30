@@ -63,12 +63,25 @@ static void sl_free(struct seglist *s)
 
 /* Render logical line L for content width `w`; returns segment count (0=EOF).
  */
-static int render_line(const paige_doc *doc, struct seglist *sl, size_t L,
-                       int w)
+static int render_req(const paige_doc *doc, paige_stats *stats,
+                      struct seglist *sl, const paige_render_req *req)
 {
     sl_reset(sl);
     struct paige_sink sink = {sl};
-    return doc->render_line(doc->ctx, L, w, &sink);
+    if (stats)
+        stats->render_calls++;
+    if (doc->render_line_ex)
+        return doc->render_line_ex(doc->ctx, req, &sink);
+    if (doc->render_line)
+        return doc->render_line(doc->ctx, req->lineno, req->width, &sink);
+    return 0;
+}
+
+static int render_line(const paige_doc *doc, paige_stats *stats,
+                       struct seglist *sl, size_t L, int w)
+{
+    paige_render_req req = {L, w, PAIGE_RENDER_WRAP, 0, NULL, 0};
+    return render_req(doc, stats, sl, &req);
 }
 
 /* ---- an output accumulator we flush to the terminal in one write ---- */
@@ -99,6 +112,15 @@ static void ob_str(struct outbuf *o, const char *s)
     ob_put(o, s, strlen(s));
 }
 
+static void write_counted(int fd, const char *s, size_t n, paige_stats *stats)
+{
+    if (stats) {
+        stats->writes++;
+        stats->bytes_emitted += n;
+    }
+    (void)!write(fd, s, n);
+}
+
 /* ---- scroll position helpers (logical line L, visual segment S) ---- */
 
 struct view {
@@ -108,11 +130,12 @@ struct view {
     size_t L;     /* top logical line */
     int S;        /* top visual segment within L */
     long pending; /* number being typed for goto, or -1 when not entering */
+    paige_stats *stats;
 };
 
 static int segcount(struct view *v, size_t L)
 {
-    return render_line(v->doc, v->sl, L, v->width);
+    return render_line(v->doc, v->stats, v->sl, L, v->width);
 }
 
 static void move_down(struct view *v, int k)
@@ -168,6 +191,8 @@ static void goto_line(struct view *v, unsigned long n)
  */
 static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
 {
+    if (v->stats)
+        v->stats->frames++;
     o->len = 0;
     ob_str(o, "\x1b[H"); /* cursor home */
     int body = t->rows - 1;
@@ -176,6 +201,8 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
     bool at_eof = false;
 
     for (int row = 0; row < body; row++) {
+        if (v->stats)
+            v->stats->rows_drawn++;
         ob_str(o, "\x1b[K"); /* clear to end of line */
         int n = at_eof ? 0 : segcount(v, L);
         if (n == 0) {
@@ -208,22 +235,29 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
 }
 
 /* Print the whole document plainly (used when it fits one screen). */
-static void print_plain(const paige_doc *doc, struct seglist *sl, int width)
+static void print_plain(const paige_doc *doc, paige_stats *stats,
+                        struct seglist *sl, int width)
 {
     for (size_t L = 0;; L++) {
-        int n = render_line(doc, sl, L, width);
+        int n = render_line(doc, stats, sl, L, width);
         if (n == 0)
             break;
         for (int i = 0; i < n; i++) {
-            (void)!write(STDOUT_FILENO, sl->buf + sl->seg[i].off,
-                         sl->seg[i].len);
-            (void)!write(STDOUT_FILENO, "\n", 1);
+            write_counted(STDOUT_FILENO, sl->buf + sl->seg[i].off,
+                          sl->seg[i].len, stats);
+            write_counted(STDOUT_FILENO, "\n", 1, stats);
         }
     }
 }
 
 int paige_run(const paige_doc *doc, const paige_opts *opts)
 {
+    paige_stats *stats = opts ? opts->stats : NULL;
+    if (stats)
+        memset(stats, 0, sizeof *stats);
+    if (!doc || (!doc->render_line && !doc->render_line_ex))
+        return -1;
+
     struct paige_term t;
     if (!paige_term_open(&t))
         return -1;
@@ -234,7 +268,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
     if (opts && opts->quit_if_one_screen) {
         int visual = 0, fits = 1;
         for (size_t L = 0;; L++) {
-            int n = render_line(doc, &sl, L, t.cols);
+            int n = render_line(doc, stats, &sl, L, t.cols);
             if (n == 0)
                 break;
             visual += n;
@@ -244,7 +278,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
             }
         }
         if (fits) {
-            print_plain(doc, &sl, t.cols);
+            print_plain(doc, stats, &sl, t.cols);
             sl_free(&sl);
             close(t.tty_fd);
             return 0;
@@ -252,7 +286,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
     }
 
     paige_term_enter(&t);
-    struct view v = {doc, &sl, t.cols, 0, 0, -1};
+    struct view v = {doc, &sl, t.cols, 0, 0, -1, stats};
     struct outbuf o = {0};
 
     /* Pause between digits: a wait longer than this commits the running number
@@ -266,7 +300,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
 
     for (;;) {
         draw(&v, &t, &o);
-        (void)!write(t.out_fd, o.p, o.len);
+        write_counted(t.out_fd, o.p, o.len, stats);
 
         int key = paige_term_key(&t);
         int body = t.rows - 1;
@@ -287,7 +321,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
                 goto_line(&v, (unsigned long)acc);
                 v.pending = acc;
                 draw(&v, &t, &o);
-                (void)!write(t.out_fd, o.p, o.len);
+                write_counted(t.out_fd, o.p, o.len, stats);
                 k = paige_term_key_timed(&t, goto_pause_ms);
             } while (k == PK_DIGIT);
             v.pending = -1;
