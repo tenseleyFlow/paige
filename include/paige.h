@@ -50,6 +50,7 @@ typedef struct paige_stats {
     unsigned long long rows_drawn;
     unsigned long long bytes_emitted;
     unsigned long long writes;
+    unsigned long long search_lines;
 } paige_stats;
 
 typedef struct paige_doc {
