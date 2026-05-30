@@ -187,6 +187,7 @@ struct view {
     int width;
     bool chop;
     size_t hscroll;
+    bool follow;
     size_t L;     /* top logical line */
     int S;        /* top visual segment within L */
     long pending; /* number being typed for goto, or -1 when not entering */
@@ -676,12 +677,47 @@ static bool goto_percent(struct view *v, unsigned long pct)
 
 static void goto_bottom(struct view *v, int body)
 {
+    if (segcount(v, v->L) == 0) {
+        v->L = 0;
+        v->S = 0;
+    }
     while (segcount(v, v->L + 1) != 0)
         v->L++;
     v->S = segcount(v, v->L) - 1;
     if (v->S < 0)
         v->S = 0;
     move_up(v, body - 1);
+}
+
+static bool follow_refresh(struct view *v, int body)
+{
+    if (!v->follow || !v->doc->refresh)
+        return false;
+    if (v->stats)
+        v->stats->follow_refreshes++;
+    if (!v->doc->refresh(v->doc->ctx))
+        return false;
+    if (v->stats)
+        v->stats->follow_updates++;
+    goto_bottom(v, body);
+    return true;
+}
+
+static void follow_start(struct view *v, int body)
+{
+    if (!v->doc->refresh) {
+        view_set_message(v, "follow unavailable");
+        return;
+    }
+    view_clear_message(v);
+    v->follow = true;
+    (void)follow_refresh(v, body);
+    goto_bottom(v, body);
+}
+
+static void follow_pause(struct view *v)
+{
+    v->follow = false;
 }
 
 static void move_left(struct view *v, size_t cols)
@@ -978,6 +1014,12 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
         snprintf(num, sizeof num, "  %s ", v->message);
     else if (v->search && v->search->message[0])
         snprintf(num, sizeof num, "  %s ", v->search->message);
+    else if (v->follow && v->chop)
+        snprintf(num, sizeof num, "  line %zu  col %zu  (FOLLOW)%s ",
+                 v->L + 1, v->hscroll + 1, at_eof ? "  (END)" : "");
+    else if (v->follow)
+        snprintf(num, sizeof num, "  line %zu  (FOLLOW)%s ", v->L + 1,
+                 at_eof ? "  (END)" : "");
     else if (v->chop)
         snprintf(num, sizeof num, "  line %zu  col %zu%s ", v->L + 1,
                  v->hscroll + 1, at_eof ? "  (END)" : "");
@@ -1059,17 +1101,34 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
      * and starts a fresh one, so "1<pause>6" lands on 6 while "16" lands on
      * sixteen. ~600ms by default; the client may override (tests use a short
      * value for speed). */
-    enum { GOTO_PAUSE_DEFAULT_MS = 600, GOTO_MAX = 1000000000L };
+    enum {
+        GOTO_PAUSE_DEFAULT_MS = 600,
+        FOLLOW_POLL_DEFAULT_MS = 250,
+        GOTO_MAX = 1000000000L,
+    };
     int goto_pause_ms = GOTO_PAUSE_DEFAULT_MS;
     if (opts && opts->goto_pause_ms > 0)
         goto_pause_ms = opts->goto_pause_ms;
+    int follow_poll_ms = FOLLOW_POLL_DEFAULT_MS;
+    if (opts && opts->follow_poll_ms > 0)
+        follow_poll_ms = opts->follow_poll_ms;
 
+    bool dirty = true;
     for (;;) {
-        draw(&v, &t, &o);
-        write_counted(t.out_fd, o.p, o.len, stats);
+        if (dirty) {
+            draw(&v, &t, &o);
+            write_counted(t.out_fd, o.p, o.len, stats);
+            dirty = false;
+        }
 
-        int key = paige_term_key(&t);
+        int key = v.follow ? paige_term_key_timed(&t, follow_poll_ms)
+                           : paige_term_key(&t);
         int body = t.rows - 1;
+        if (key == PK_TIMEOUT) {
+            if (follow_refresh(&v, body))
+                dirty = true;
+            continue;
+        }
     redispatch:
         if (key == PK_QUIT)
             break;
@@ -1078,6 +1137,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
              * immediately; a pause longer than GOTO_PAUSE_MS ends entry. The
              * terminating keystroke (if any) is re-dispatched so "16q" quits
              * and "16j" then scrolls. */
+            follow_pause(&v);
             view_clear_message(&v);
             struct view_pos origin;
             view_save(&v, &origin);
@@ -1098,81 +1158,104 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
                 view_restore(&v, &origin);
                 if (goto_percent(&v, (unsigned long)acc))
                     view_note_previous(&v, &origin);
+                dirty = true;
                 continue;
             }
             view_note_previous(&v, &origin);
-            if (k == PK_TIMEOUT)
+            if (k == PK_TIMEOUT) {
+                dirty = true;
                 continue; /* paused: commit and wait for the next command */
+            }
             key = k;
             goto redispatch; /* let the terminating key act */
         }
         switch (key) {
         case PK_RIGHT:
+            follow_pause(&v);
             view_clear_message(&v);
             move_right(&v, 8);
             break;
         case PK_LEFT:
+            follow_pause(&v);
             view_clear_message(&v);
             move_left(&v, 8);
             break;
+        case PK_FOLLOW:
+            follow_start(&v, body);
+            break;
         case PK_PERCENT:
+            follow_pause(&v);
             view_set_message(&v, "type digits then %%");
             break;
         case PK_MARK_SET:
+            follow_pause(&v);
             if (mark_enter(&v, &t, &o, true, body) == PK_QUIT)
                 goto done;
             break;
         case PK_MARK_JUMP:
+            follow_pause(&v);
             if (mark_enter(&v, &t, &o, false, body) == PK_QUIT)
                 goto done;
             break;
         case PK_HELP:
+            follow_pause(&v);
             view_clear_message(&v);
             help_enter(&v, &t, &o);
             break;
         case PK_SEARCH_FWD:
+            follow_pause(&v);
             view_clear_message(&v);
             (void)search_enter(&v, &t, &o, SEARCH_FORWARD);
             break;
         case PK_SEARCH_BACK:
+            follow_pause(&v);
             view_clear_message(&v);
             (void)search_enter(&v, &t, &o, SEARCH_BACKWARD);
             break;
         case PK_SEARCH_NEXT:
+            follow_pause(&v);
             v.message[0] = '\0';
             search_repeat(&v, search.dir == SEARCH_BACKWARD ? SEARCH_BACKWARD
                                                             : SEARCH_FORWARD);
             break;
         case PK_SEARCH_PREV:
+            follow_pause(&v);
             v.message[0] = '\0';
             search_repeat(&v, search.dir == SEARCH_BACKWARD ? SEARCH_FORWARD
                                                             : SEARCH_BACKWARD);
             break;
         case PK_DOWN:
+            follow_pause(&v);
             view_clear_message(&v);
             move_down(&v, 1);
             break;
         case PK_UP:
+            follow_pause(&v);
             view_clear_message(&v);
             move_up(&v, 1);
             break;
         case PK_PGDN:
+            follow_pause(&v);
             view_clear_message(&v);
             move_down(&v, body);
             break;
         case PK_PGUP:
+            follow_pause(&v);
             view_clear_message(&v);
             move_up(&v, body);
             break;
         case PK_HALFDOWN:
+            follow_pause(&v);
             view_clear_message(&v);
             move_down(&v, body / 2);
             break;
         case PK_HALFUP:
+            follow_pause(&v);
             view_clear_message(&v);
             move_up(&v, body / 2);
             break;
         case PK_TOP:
+            follow_pause(&v);
             view_clear_message(&v);
             {
                 struct view_pos origin;
@@ -1183,6 +1266,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
             }
             break;
         case PK_BOTTOM:
+            follow_pause(&v);
             view_clear_message(&v);
             {
                 struct view_pos origin;
@@ -1201,6 +1285,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
         default:
             break;
         }
+        dirty = true;
     }
 
 done:

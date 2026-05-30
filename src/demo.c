@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 struct doc {
@@ -18,6 +19,7 @@ struct doc {
     size_t size;
     size_t *line; /* byte offset of each logical line */
     size_t nlines;
+    const char *path;
     const char *title;
 };
 
@@ -225,6 +227,31 @@ static void index_lines(struct doc *d)
     }
 }
 
+static int refresh_doc(void *ctx)
+{
+    struct doc *d = ctx;
+    if (!d->path)
+        return 0;
+    struct stat st;
+    if (stat(d->path, &st) < 0 || st.st_size < 0)
+        return 0;
+    if ((size_t)st.st_size == d->size)
+        return 0;
+
+    size_t size = 0;
+    char *data = slurp(d->path, &size);
+    if (!data)
+        return 0;
+    free(d->data);
+    free(d->line);
+    d->data = data;
+    d->size = size;
+    d->line = NULL;
+    d->nlines = 0;
+    index_lines(d);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     const char *path = argc > 1 ? argv[1] : NULL;
@@ -240,6 +267,7 @@ int main(int argc, char **argv)
         return 1;
     }
     d.title = path ? path : "stdin";
+    d.path = path;
     index_lines(&d);
 
     paige_doc doc = { .ctx = &d,
@@ -247,7 +275,8 @@ int main(int argc, char **argv)
                       .title = d.title,
                       .raw_line = raw_line,
                       .line_count = line_count,
-                      .render_line_ex = render_line_ex };
+                      .render_line_ex = render_line_ex,
+                      .refresh = refresh_doc };
     if (getenv("PAIGE_NO_RAW"))
         doc.raw_line = NULL;
     if (getenv("PAIGE_NO_COUNT"))
@@ -263,6 +292,9 @@ int main(int argc, char **argv)
     const char *gms = getenv("PAIGE_GOTO_MS");
     if (gms)
         opts.goto_pause_ms = atoi(gms);
+    const char *fms = getenv("PAIGE_FOLLOW_MS");
+    if (fms)
+        opts.follow_poll_ms = atoi(fms);
     if (paige_run(&doc, &opts) < 0) {
         /* No terminal: dump plainly. */
         (void)!write(STDOUT_FILENO, d.data, d.size);
@@ -270,10 +302,12 @@ int main(int argc, char **argv)
     if (show_stats) {
         fprintf(stderr,
                 "paige-stats: render=%llu frames=%llu rows=%llu bytes=%llu "
-                "writes=%llu search_lines=%llu hscroll=%llu\n",
+                "writes=%llu search_lines=%llu hscroll=%llu follow_refreshes=%llu "
+                "follow_updates=%llu\n",
                 stats.render_calls, stats.frames, stats.rows_drawn,
                 stats.bytes_emitted, stats.writes, stats.search_lines,
-                stats.hscroll_moves);
+                stats.hscroll_moves, stats.follow_refreshes,
+                stats.follow_updates);
     }
     free(d.data);
     free(d.line);

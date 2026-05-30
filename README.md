@@ -34,6 +34,8 @@ path for upcoming features:
   features without inspecting ANSI-rendered output.
 - `line_count(ctx, out)` exposes a known logical line count for percentage jumps;
   if unset, `%` reports that percent jumps are unavailable.
+- `refresh(ctx)` lets a host report live-content changes while follow mode is
+  active; paige redraws only when it returns nonzero.
 - `render_line_ex(ctx, req, sink)` receives a `paige_render_req` with draw context
   such as wrap mode, horizontal offset, and match spans. If unset, paige falls
   back to `render_line`.
@@ -41,6 +43,11 @@ path for upcoming features:
   it with basic render/write/search counters during `paige_run`.
 - `paige_opts.chop_long_lines` requests no-wrap display through
   `render_line_ex`; zero keeps the default wrapping behavior.
+- `paige_opts.follow_poll_ms` controls follow-mode refresh cadence; `<=0` uses
+  the default ~250ms poll. Idle follow polls do not repaint unless `refresh`
+  reports a change. Multiple-document switching and appended-line highlighting
+  remain host-owned: run paige separately per document or render new content
+  distinctly in the client if desired.
 
 ## Build
 
@@ -56,11 +63,12 @@ and the BSDs.
 ## Keys
 `q` quit · `j`/`k`/`↑`/`↓` line · space/`f`/`b` page · `d`/`u` half-page ·
 `g`/`G` top/bottom · `/`/`?` search · `n`/`N` repeat search · `m<char>` set
-mark · `'<char>` jump to mark · `''` previous position · `h` help · `←`/`→`
-horizontal scroll in chop mode · digits jump to a line as you type — the view
-follows each keystroke (`1`,`6` → line 16), and a pause longer than ~600ms
-commits the number and starts a fresh one (`1` … `6` → line 6). End a number
-with `%` to jump to that percentage when the host provides `line_count`.
+mark · `'<char>` jump to mark · `''` previous position · `F` follow live content
+until manual navigation · `h` help · `←`/`→` horizontal scroll in chop mode ·
+digits jump to a line as you type — the view follows each keystroke (`1`,`6` →
+line 16), and a pause longer than ~600ms commits the number and starts a fresh
+one (`1` … `6` → line 6). End a number with `%` to jump to that percentage when
+the host provides `line_count`.
 
 ## License
 MIT — see [LICENSE](LICENSE).

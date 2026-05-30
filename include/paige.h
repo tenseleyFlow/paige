@@ -52,6 +52,8 @@ typedef struct paige_stats {
     unsigned long long writes;
     unsigned long long search_lines;
     unsigned long long hscroll_moves;
+    unsigned long long follow_refreshes;
+    unsigned long long follow_updates;
 } paige_stats;
 
 typedef struct paige_doc {
@@ -91,6 +93,10 @@ typedef struct paige_doc {
     /* Optional known logical line count. Enables percentage jumps without
      * forcing paige to scan an unknown or streaming document to EOF. */
     int (*line_count)(void *ctx, size_t *out);
+
+    /* Optional live-content refresh. Called while follow mode is active; return
+     * nonzero when paige should redraw because content changed. */
+    int (*refresh)(void *ctx);
 } paige_doc;
 
 typedef struct paige_opts {
@@ -98,6 +104,7 @@ typedef struct paige_opts {
     int goto_pause_ms;      /* digit-goto entry timeout; <=0 uses the default */
     paige_stats *stats;     /* optional counters; zeroed at paige_run start */
     int chop_long_lines;    /* if nonzero, show one row per logical line */
+    int follow_poll_ms;     /* follow refresh cadence; <=0 uses the default */
 } paige_opts;
 
 /*
