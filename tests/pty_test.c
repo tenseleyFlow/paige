@@ -42,6 +42,7 @@ int main(void)
     /* Shorten the digit-goto entry timeout so the goto tests stay fast and the
      * pause/accumulate margins are robust across slow and fast machines. */
     setenv("PAIGE_GOTO_MS", "150", 1);
+    setenv("PAIGE_FOLLOW_MS", "80", 1);
     setenv("PAIGE_STATS", "1", 1);
 
     char tmpl[] = "/tmp/paige_pty_XXXXXX";
@@ -350,6 +351,85 @@ int main(void)
     close(master);
 
     unsetenv("PAIGE_NO_COUNT");
+    char follow_tmpl[] = "/tmp/paige_follow_XXXXXX";
+    int ffd = mkstemp(follow_tmpl);
+    if (ffd < 0) {
+        perror("mkstemp");
+        unlink(tmpl);
+        return 1;
+    }
+    for (int i = 1; i <= 11; i++) {
+        char line[32];
+        int m = snprintf(line, sizeof line, "follow%03d\n", i);
+        (void)!write(ffd, line, (size_t)m);
+    }
+    (void)!write(ffd, "partial", 7);
+    close(ffd);
+
+    pid = forkpty(&master, NULL, NULL, &ws);
+    if (pid < 0) {
+        perror("forkpty");
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        return 1;
+    }
+    if (pid == 0) {
+        execl("./paige-demo", "paige-demo", follow_tmpl, (char *)NULL);
+        _exit(127);
+    }
+    pty_read_screen(master, buf, sizeof buf, 300);
+    pty_send_text(master, "F");
+    pty_read_screen(master, buf, sizeof buf, 300);
+    ffd = open(follow_tmpl, O_WRONLY | O_APPEND);
+    if (ffd < 0) {
+        perror("open follow append");
+        fails++;
+    } else {
+        const char *append = "-more\nfollow-new\n";
+        (void)!write(ffd, append, strlen(append));
+        close(ffd);
+    }
+    pty_read_screen(master, buf, sizeof buf, 1000);
+    if (!pty_has(buf, "partial-more") || !pty_has(buf, "follow-new") ||
+        !pty_has(buf, "FOLLOW")) {
+        printf("FAIL: follow mode did not redraw appended content\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "k"); /* manual navigation pauses follow */
+    pty_read_screen(master, buf, sizeof buf, 300);
+    ffd = open(follow_tmpl, O_WRONLY | O_APPEND);
+    if (ffd < 0) {
+        perror("open follow paused append");
+        fails++;
+    } else {
+        const char *append = "paused-new\n";
+        (void)!write(ffd, append, strlen(append));
+        close(ffd);
+    }
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (pty_has(buf, "paused-new")) {
+        printf("FAIL: paused follow should not redraw appended content\n");
+        fails++;
+    }
+    pty_send_text(master, "F");
+    pty_read_screen(master, buf, sizeof buf, 1000);
+    if (!pty_has(buf, "paused-new") || !pty_has(buf, "FOLLOW")) {
+        printf("FAIL: follow resume did not load paused append\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "q");
+    pty_drain(master, buf, sizeof buf, 300);
+    if (waitpid(pid, &status, WNOHANG) == 0) {
+        pty_drain(master, buf, sizeof buf, 300);
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(pid, SIGTERM);
+            waitpid(pid, &status, 0);
+        }
+    }
+    close(master);
+
     setenv("PAIGE_CHOP", "1", 1);
     char chop_tmpl[] = "/tmp/paige_chop_XXXXXX";
     int cfd = mkstemp(chop_tmpl);
@@ -412,6 +492,7 @@ int main(void)
     }
     close(master);
     unlink(tmpl);
+    unlink(follow_tmpl);
     unlink(chop_tmpl);
 
     if (fails == 0) {
