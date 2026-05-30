@@ -55,14 +55,101 @@ static int render_line(void *ctx, size_t L, int width, paige_sink *sink)
     return segs;
 }
 
+static int match_cmp(const void *a, const void *b)
+{
+    const paige_match *ma = a;
+    const paige_match *mb = b;
+    if (ma->off < mb->off)
+        return -1;
+    if (ma->off > mb->off)
+        return 1;
+    return 0;
+}
+
+static void emit_highlighted(paige_sink *sink, const char *bytes,
+                             size_t seg_start, size_t len,
+                             const paige_match *matches, size_t nmatches)
+{
+    enum { SGR_LEN = 4 };
+    const char *on = "\x1b[7m";
+    const char *off = "\x1b[0m";
+    size_t overlaps = 0;
+    for (size_t i = 0; i < nmatches; i++) {
+        size_t m0 = matches[i].off;
+        size_t m1 = matches[i].off + matches[i].len;
+        if (m1 > seg_start && m0 < seg_start + len)
+            overlaps++;
+    }
+    if (overlaps == 0) {
+        paige_emit(sink, bytes, len);
+        return;
+    }
+
+    size_t cap = len + overlaps * SGR_LEN * 2;
+    char *out = malloc(cap);
+    if (!out) {
+        paige_emit(sink, bytes, len);
+        return;
+    }
+
+    size_t pos = 0, out_len = 0;
+    for (size_t i = 0; i < nmatches && pos < len; i++) {
+        size_t m0 = matches[i].off;
+        size_t m1 = matches[i].off + matches[i].len;
+        if (m1 <= seg_start || m0 >= seg_start + len)
+            continue;
+        size_t a = m0 > seg_start ? m0 - seg_start : 0;
+        size_t b = m1 < seg_start + len ? m1 - seg_start : len;
+        if (a > pos) {
+            memcpy(out + out_len, bytes + pos, a - pos);
+            out_len += a - pos;
+        }
+        memcpy(out + out_len, on, SGR_LEN);
+        out_len += SGR_LEN;
+        memcpy(out + out_len, bytes + a, b - a);
+        out_len += b - a;
+        memcpy(out + out_len, off, SGR_LEN);
+        out_len += SGR_LEN;
+        pos = b;
+    }
+    if (pos < len) {
+        memcpy(out + out_len, bytes + pos, len - pos);
+        out_len += len - pos;
+    }
+    paige_emit(sink, out, out_len);
+    free(out);
+}
+
 static int render_line_ex(void *ctx, const paige_render_req *req,
                           paige_sink *sink)
 {
-    (void)req->flags;
-    (void)req->hscroll;
-    (void)req->matches;
-    (void)req->nmatches;
-    return render_line(ctx, req->lineno, req->width, sink);
+    struct doc *d = ctx;
+    size_t start, len;
+    if (!line_bounds(d, req->lineno, &start, &len))
+        return 0;
+    int width = req->width;
+    if (width < 1)
+        width = 1;
+    if (len == 0) {
+        paige_emit(sink, "", 0);
+        return 1;
+    }
+
+    paige_match matches[64];
+    size_t nmatches = req->nmatches < 64 ? req->nmatches : 64;
+    if (nmatches > 0) {
+        memcpy(matches, req->matches, nmatches * sizeof *matches);
+        qsort(matches, nmatches, sizeof *matches, match_cmp);
+    }
+
+    int segs = 0;
+    for (size_t i = 0; i < len; i += (size_t)width) {
+        size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
+        emit_highlighted(sink, d->data + start + i, i, chunk, matches,
+                         nmatches);
+        segs++;
+    }
+    return segs;
 }
 
 static int raw_line(void *ctx, size_t L, paige_line *out)
@@ -145,6 +232,8 @@ int main(int argc, char **argv)
                       .title = d.title,
                       .raw_line = raw_line,
                       .render_line_ex = render_line_ex };
+    if (getenv("PAIGE_NO_RAW"))
+        doc.raw_line = NULL;
     paige_stats stats = {0};
     paige_opts opts = { .quit_if_one_screen = 1 };
     const char *show_stats = getenv("PAIGE_STATS");
@@ -161,9 +250,9 @@ int main(int argc, char **argv)
     if (show_stats) {
         fprintf(stderr,
                 "paige-stats: render=%llu frames=%llu rows=%llu bytes=%llu "
-                "writes=%llu\n",
+                "writes=%llu search_lines=%llu\n",
                 stats.render_calls, stats.frames, stats.rows_drawn,
-                stats.bytes_emitted, stats.writes);
+                stats.bytes_emitted, stats.writes, stats.search_lines);
     }
     free(d.data);
     free(d.line);

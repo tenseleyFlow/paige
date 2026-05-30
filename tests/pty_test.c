@@ -108,6 +108,65 @@ int main(void)
         fails++;
     }
 
+    pty_send_text(master, "/line05\n"); /* forward search */
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "line 50")) {
+        printf("FAIL: search for line05 did not land on line 50\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    if (!pty_has(buf, "\x1b[7mline05")) {
+        printf("FAIL: search highlight missing\n");
+        fails++;
+    }
+
+    pty_send_text(master, "n"); /* next match */
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "line 51")) {
+        printf("FAIL: 'n' did not advance to next search match\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
+    pty_send_text(master, "N"); /* previous match */
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "line 50")) {
+        printf("FAIL: 'N' did not return to previous search match\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
+    pty_send_text(master, "?line02\n"); /* backward search */
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "line 29")) {
+        printf("FAIL: backward search did not land on line 29\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
+    pty_send_text(master, "/zzzz\n"); /* not found */
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "pattern not found") || !pty_has(buf, "line029")) {
+        printf("FAIL: not-found search did not report and restore origin\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
+    pty_send_text(master, "/line080"); /* live search, then cancel */
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "line080")) {
+        printf("FAIL: incremental search did not move to line 80\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send(master, "\x1b", 1);
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "line029")) {
+        printf("FAIL: escape did not restore pre-search view\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
     /* Live incremental goto. PAIGE_GOTO_MS (above) shortens the entry timeout
      * for speed, but the pauses below are sized past the 600ms DEFAULT so the
      * test is correct even where that env var does not take effect. The
@@ -163,10 +222,39 @@ int main(void)
         }
     }
     close(master);
+
+    setenv("PAIGE_NO_RAW", "1", 1);
+    pid = forkpty(&master, NULL, NULL, &ws);
+    if (pid < 0) {
+        perror("forkpty");
+        unlink(tmpl);
+        return 1;
+    }
+    if (pid == 0) {
+        execl("./paige-demo", "paige-demo", tmpl, (char *)NULL);
+        _exit(127);
+    }
+    pty_read_screen(master, buf, sizeof buf, 300);
+    pty_send_text(master, "/line050\n");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "search unavailable")) {
+        printf("FAIL: missing raw-line hook should report search unavailable\n");
+        fails++;
+    }
+    pty_send_text(master, "q");
+    pty_drain(master, buf, sizeof buf, 300);
+    if (waitpid(pid, &status, WNOHANG) == 0) {
+        pty_drain(master, buf, sizeof buf, 300);
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(pid, SIGTERM);
+            waitpid(pid, &status, 0);
+        }
+    }
+    close(master);
     unlink(tmpl);
 
     if (fails == 0) {
-        printf("pty: pager nav (j/G/g/q, goto-digits, quit-if-one-screen) OK\n");
+        printf("pty: pager nav/search/goto/quit OK\n");
         return 0;
     }
     return 1;
