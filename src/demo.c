@@ -94,6 +94,10 @@ static void index_lines(struct doc *d)
 int main(int argc, char **argv)
 {
     const char *path = argc > 1 ? argv[1] : NULL;
+    if (path == NULL && isatty(STDIN_FILENO)) {
+        fprintf(stderr, "usage: paige-demo FILE   (or pipe content on stdin)\n");
+        return 2;
+    }
     struct doc d;
     memset(&d, 0, sizeof d);
     d.data = slurp(path, &d.size);
