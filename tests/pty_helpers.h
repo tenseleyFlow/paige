@@ -48,7 +48,7 @@ static int pty_has(const char *hay, const char *needle)
 static void pty_dump_visible(const char *buf)
 {
     printf("  visible lines:");
-    for (int i = 1; i <= 100; i++) {
+    for (int i = 1; i <= 120; i++) {
         char needle[16];
         snprintf(needle, sizeof needle, "line%03d", i);
         if (strstr(buf, needle))

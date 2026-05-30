@@ -37,7 +37,7 @@ static void on_alarm(int sig)
 int main(void)
 {
     signal(SIGALRM, on_alarm);
-    alarm(20); /* never hang CI */
+    alarm(30); /* never hang CI */
 
     /* Shorten the digit-goto entry timeout so the goto tests stay fast and the
      * pause/accumulate margins are robust across slow and fast machines. */
@@ -50,7 +50,7 @@ int main(void)
         perror("mkstemp");
         return 1;
     }
-    for (int i = 1; i <= 100; i++) {
+    for (int i = 1; i <= 120; i++) {
         char line[32];
         int m = snprintf(line, sizeof line, "line%03d\n", i);
         (void)!write(fd, line, (size_t)m);
@@ -96,7 +96,7 @@ int main(void)
 
     pty_send_text(master, "G"); /* jump to bottom */
     pty_read_screen(master, buf, sizeof buf, 300);
-    if (!pty_has(buf, "line100")) {
+    if (!pty_has(buf, "line120")) {
         printf("FAIL: 'G' did not reach the last line\n");
         fails++;
     }
@@ -163,6 +163,72 @@ int main(void)
     pty_read_screen(master, buf, sizeof buf, 500);
     if (!pty_has(buf, "line029")) {
         printf("FAIL: escape did not restore pre-search view\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
+    pty_send_text(master, "50%"); /* percent goto on 120 known lines */
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "line060") || !pty_has(buf, "line 60")) {
+        printf("FAIL: '50%%' did not jump to the middle of known content\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
+    pty_send_text(master, "ma"); /* set mark a at line 60 */
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "mark a set")) {
+        printf("FAIL: mark set status missing\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "g");
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "line001")) {
+        printf("FAIL: top jump before mark test failed\n");
+        fails++;
+    }
+    pty_send_text(master, "'a");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "line060")) {
+        printf("FAIL: mark jump did not return to line 60\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "''");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "line001")) {
+        printf("FAIL: previous-position mark did not return to line 1\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "'z");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "mark z not set")) {
+        printf("FAIL: missing mark status not shown\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
+    pty_send_text(master, "~");
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "unknown command")) {
+        printf("FAIL: unknown command status not shown\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+
+    pty_send_text(master, "h");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "paige help") || !pty_has(buf, "Navigation:")) {
+        printf("FAIL: help did not open\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "q");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "line001") || pty_has(buf, "paige help")) {
+        printf("FAIL: help did not return to saved view\n");
         pty_dump_visible(buf);
         fails++;
     }
@@ -253,6 +319,37 @@ int main(void)
     close(master);
 
     unsetenv("PAIGE_NO_RAW");
+    setenv("PAIGE_NO_COUNT", "1", 1);
+    pid = forkpty(&master, NULL, NULL, &ws);
+    if (pid < 0) {
+        perror("forkpty");
+        unlink(tmpl);
+        return 1;
+    }
+    if (pid == 0) {
+        execl("./paige-demo", "paige-demo", tmpl, (char *)NULL);
+        _exit(127);
+    }
+    pty_read_screen(master, buf, sizeof buf, 300);
+    pty_send_text(master, "50%");
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "percent unavailable") || !pty_has(buf, "line001")) {
+        printf("FAIL: missing line-count hook should report percent unavailable\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "q");
+    pty_drain(master, buf, sizeof buf, 300);
+    if (waitpid(pid, &status, WNOHANG) == 0) {
+        pty_drain(master, buf, sizeof buf, 300);
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(pid, SIGTERM);
+            waitpid(pid, &status, 0);
+        }
+    }
+    close(master);
+
+    unsetenv("PAIGE_NO_COUNT");
     setenv("PAIGE_CHOP", "1", 1);
     char chop_tmpl[] = "/tmp/paige_chop_XXXXXX";
     int cfd = mkstemp(chop_tmpl);
