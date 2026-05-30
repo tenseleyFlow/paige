@@ -17,7 +17,6 @@
 #endif
 
 #include <fcntl.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,48 +24,14 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+#include "pty_helpers.h"
+
 static void on_alarm(int sig)
 {
     (void)sig;
     const char *m = "FAIL: pty_test timed out\n";
     (void)!write(2, m, strlen(m));
     _exit(2);
-}
-
-/* Read from fd until it goes idle for idle_ms; NUL-terminate. */
-static void read_screen(int fd, char *buf, size_t cap, int idle_ms)
-{
-    size_t len = 0;
-    for (;;) {
-        struct pollfd p = { fd, POLLIN, 0 };
-        if (poll(&p, 1, idle_ms) <= 0)
-            break;
-        ssize_t n = read(fd, buf + len, cap - len - 1);
-        if (n <= 0)
-            break;
-        len += (size_t)n;
-        if (len >= cap - 1)
-            break;
-    }
-    buf[len] = '\0';
-}
-
-static int has(const char *hay, const char *needle)
-{
-    return strstr(hay, needle) != NULL;
-}
-
-/* On failure, report which line markers the captured screen actually holds. */
-static void dump_visible(const char *buf)
-{
-    printf("  visible lines:");
-    for (int i = 1; i <= 100; i++) {
-        char needle[16];
-        snprintf(needle, sizeof needle, "line%03d", i);
-        if (strstr(buf, needle))
-            printf(" %d", i);
-    }
-    printf("\n");
 }
 
 int main(void)
@@ -77,6 +42,7 @@ int main(void)
     /* Shorten the digit-goto entry timeout so the goto tests stay fast and the
      * pause/accumulate margins are robust across slow and fast machines. */
     setenv("PAIGE_GOTO_MS", "150", 1);
+    setenv("PAIGE_STATS", "1", 1);
 
     char tmpl[] = "/tmp/paige_pty_XXXXXX";
     int fd = mkstemp(tmpl);
@@ -111,33 +77,33 @@ int main(void)
     char buf[1 << 16];
     int fails = 0;
 
-    read_screen(master, buf, sizeof buf, 300); /* initial screen */
-    if (!has(buf, "line001") || !has(buf, "line009")) {
+    pty_read_screen(master, buf, sizeof buf, 300); /* initial screen */
+    if (!pty_has(buf, "line001") || !pty_has(buf, "line009")) {
         printf("FAIL: initial screen missing lines 1-9\n");
         fails++;
     }
-    if (has(buf, "line020")) {
+    if (pty_has(buf, "line020")) {
         printf("FAIL: showed more than a screenful\n");
         fails++;
     }
 
-    (void)!write(master, "j", 1); /* scroll down one */
-    read_screen(master, buf, sizeof buf, 300);
-    if (!has(buf, "line002") || !has(buf, "line010")) {
+    pty_send_text(master, "j"); /* scroll down one */
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "line002") || !pty_has(buf, "line010")) {
         printf("FAIL: after 'j' expected lines 2-10\n");
         fails++;
     }
 
-    (void)!write(master, "G", 1); /* jump to bottom */
-    read_screen(master, buf, sizeof buf, 300);
-    if (!has(buf, "line100")) {
+    pty_send_text(master, "G"); /* jump to bottom */
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "line100")) {
         printf("FAIL: 'G' did not reach the last line\n");
         fails++;
     }
 
-    (void)!write(master, "g", 1); /* jump to top */
-    read_screen(master, buf, sizeof buf, 300);
-    if (!has(buf, "line001")) {
+    pty_send_text(master, "g"); /* jump to top */
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "line001")) {
         printf("FAIL: 'g' did not return to the top\n");
         fails++;
     }
@@ -147,46 +113,50 @@ int main(void)
      * test is correct even where that env var does not take effect. The
      * accumulate case feeds both digits in one write, so the second digit beats
      * the timeout regardless of scheduling. */
-    (void)!write(master, "16", 2);
-    read_screen(master, buf, sizeof buf, 300);
-    if (!has(buf, "line016") || !has(buf, "line024")) {
+    pty_send_text(master, "16");
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "line016") || !pty_has(buf, "line024")) {
         printf("FAIL: '16' did not jump to line 16\n");
         fails++;
     }
-    if (has(buf, "line030")) {
+    if (pty_has(buf, "line030")) {
         printf("FAIL: '16' overshot\n");
         fails++;
     }
     usleep(800 * 1000);                        /* > default timeout: commit */
-    read_screen(master, buf, sizeof buf, 200); /* drain to a clean buffer */
+    pty_drain(master, buf, sizeof buf, 200); /* drain to a clean buffer */
 
     /* a pause longer than the timeout commits the first number and starts a new
      * one: "1" <pause> "6" lands on line 6, not line 16. */
-    (void)!write(master, "1", 1);
-    read_screen(master, buf, sizeof buf, 200);
+    pty_send_text(master, "1");
+    pty_read_screen(master, buf, sizeof buf, 200);
     usleep(800 * 1000); /* exceed the entry timeout: commit "1" */
-    (void)!write(master, "6", 1);
-    read_screen(master, buf, sizeof buf, 300);
-    if (!has(buf, "line006") || !has(buf, "line014")) {
+    pty_send_text(master, "6");
+    pty_read_screen(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "line006") || !pty_has(buf, "line014")) {
         printf("FAIL: paused '1..6' should land on line 6\n");
-        dump_visible(buf);
+        pty_dump_visible(buf);
         fails++;
     }
-    if (has(buf, "line016")) {
+    if (pty_has(buf, "line016")) {
         printf("FAIL: paused '1..6' wrongly accumulated to 16\n");
-        dump_visible(buf);
+        pty_dump_visible(buf);
         fails++;
     }
     usleep(800 * 1000); /* commit before the quit test */
-    read_screen(master, buf, sizeof buf, 200);
+    pty_drain(master, buf, sizeof buf, 200);
 
-    (void)!write(master, "q", 1); /* quit */
+    pty_send_text(master, "q"); /* quit */
     /* Drain remaining output so the child never blocks on a full pty buffer. */
-    read_screen(master, buf, sizeof buf, 300);
+    pty_drain(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "paige-stats:")) {
+        printf("FAIL: stats output missing after quit\n");
+        fails++;
+    }
     int status;
     if (waitpid(pid, &status, WNOHANG) == 0) {
         /* still alive: give it a moment, then force it down (backstop) */
-        read_screen(master, buf, sizeof buf, 300);
+        pty_drain(master, buf, sizeof buf, 300);
         if (waitpid(pid, &status, WNOHANG) == 0) {
             kill(pid, SIGTERM);
             waitpid(pid, &status, 0);

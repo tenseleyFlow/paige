@@ -17,6 +17,7 @@ struct paige_term {
     bool alt;
     int rows, cols;
     int digit; /* 0..9 when the last key was PK_DIGIT */
+    unsigned char ch; /* printable byte when the last key was PK_CHAR */
 };
 
 /* Decoded key actions. */
@@ -31,6 +32,15 @@ enum paige_key {
     PK_HALFDOWN,
     PK_TOP,
     PK_BOTTOM,
+    PK_LEFT,
+    PK_RIGHT,
+    PK_HOME,
+    PK_END,
+    PK_ENTER,
+    PK_ESC,
+    PK_BACKSPACE,
+    PK_DELETE,
+    PK_CHAR,  /* printable byte was typed; value in t->ch */
     PK_DIGIT, /* a digit was typed; value in t->digit */
     PK_RESIZE,
     PK_TIMEOUT, /* paige_term_key_timed: no key within the deadline */
@@ -54,8 +64,17 @@ void paige_term_size(struct paige_term *t);
  * change). */
 int paige_term_key(struct paige_term *t);
 
+/* Block for one key in text-entry mode. Printable bytes return PK_CHAR instead
+ * of viewing commands, while arrows/edit keys keep semantic actions. */
+int paige_term_key_input(struct paige_term *t);
+
 /* Like paige_term_key but wait at most timeout_ms; PK_TIMEOUT if none arrives.
  * Used for the live digit-goto, where a pause ends number entry. */
 int paige_term_key_timed(struct paige_term *t, int timeout_ms);
+
+/* Pure single-byte decoders for tests and future modal input code. Do not pass
+ * ESC here unless the term has a live tty fd for the rest of the sequence. */
+int paige_term_decode_command_byte(struct paige_term *t, unsigned char c);
+int paige_term_decode_input_byte(struct paige_term *t, unsigned char c);
 
 #endif /* PAIGE_TERM_H */
