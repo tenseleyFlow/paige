@@ -270,19 +270,19 @@ int main(int argc, char **argv)
     d.path = path;
     index_lines(&d);
 
-    paige_doc doc = { .ctx = &d,
-                      .render_line = render_line,
-                      .title = d.title,
-                      .raw_line = raw_line,
-                      .line_count = line_count,
-                      .render_line_ex = render_line_ex,
-                      .refresh = refresh_doc };
+    paige_doc doc = {.ctx = &d,
+                     .render_line = render_line,
+                     .title = d.title,
+                     .raw_line = raw_line,
+                     .line_count = line_count,
+                     .render_line_ex = render_line_ex,
+                     .refresh = refresh_doc};
     if (getenv("PAIGE_NO_RAW"))
         doc.raw_line = NULL;
     if (getenv("PAIGE_NO_COUNT"))
         doc.line_count = NULL;
     paige_stats stats = {0};
-    paige_opts opts = { .quit_if_one_screen = 1 };
+    paige_opts opts = {.quit_if_one_screen = 1};
     if (getenv("PAIGE_CHOP"))
         opts.chop_long_lines = 1;
     const char *show_stats = getenv("PAIGE_STATS");
@@ -300,14 +300,14 @@ int main(int argc, char **argv)
         (void)!write(STDOUT_FILENO, d.data, d.size);
     }
     if (show_stats) {
-        fprintf(stderr,
-                "paige-stats: render=%llu frames=%llu rows=%llu bytes=%llu "
-                "writes=%llu search_lines=%llu hscroll=%llu follow_refreshes=%llu "
-                "follow_updates=%llu\n",
-                stats.render_calls, stats.frames, stats.rows_drawn,
-                stats.bytes_emitted, stats.writes, stats.search_lines,
-                stats.hscroll_moves, stats.follow_refreshes,
-                stats.follow_updates);
+        fprintf(
+            stderr,
+            "paige-stats: render=%llu frames=%llu rows=%llu bytes=%llu "
+            "writes=%llu search_lines=%llu hscroll=%llu follow_refreshes=%llu "
+            "follow_updates=%llu\n",
+            stats.render_calls, stats.frames, stats.rows_drawn,
+            stats.bytes_emitted, stats.writes, stats.search_lines,
+            stats.hscroll_moves, stats.follow_refreshes, stats.follow_updates);
     }
     free(d.data);
     free(d.line);

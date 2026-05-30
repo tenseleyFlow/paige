@@ -89,8 +89,9 @@ typedef struct paige_doc {
     /*
      * Optional extended renderer. When set, paige calls this instead of
      * render_line(). The request carries future-proof draw context such as wrap
-     * mode, horizontal offset, and match spans. Return the emitted segment count
-     * or 0 at EOF, with the same determinism requirements as render_line().
+     * mode, horizontal offset, and match spans. Return the emitted segment
+     * count or 0 at EOF, with the same determinism requirements as
+     * render_line().
      */
     int (*render_line_ex)(void *ctx, const paige_render_req *req,
                           paige_sink *sink);

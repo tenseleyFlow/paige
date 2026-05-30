@@ -33,9 +33,9 @@ static bool match_at(const char *hay, const char *needle, size_t nlen,
     return true;
 }
 
-bool paige_search_find_forward(const char *hay, size_t hlen,
-                               const char *needle, size_t nlen, size_t start,
-                               bool case_sensitive, size_t *out_off)
+bool paige_search_find_forward(const char *hay, size_t hlen, const char *needle,
+                               size_t nlen, size_t start, bool case_sensitive,
+                               size_t *out_off)
 {
     if (nlen == 0 || nlen > hlen || start > hlen - nlen)
         return false;
@@ -49,9 +49,8 @@ bool paige_search_find_forward(const char *hay, size_t hlen,
 }
 
 bool paige_search_find_backward(const char *hay, size_t hlen,
-                                const char *needle, size_t nlen,
-                                size_t before, bool case_sensitive,
-                                size_t *out_off)
+                                const char *needle, size_t nlen, size_t before,
+                                bool case_sensitive, size_t *out_off)
 {
     if (nlen == 0 || nlen > hlen || before == 0)
         return false;

@@ -16,7 +16,7 @@ struct paige_term {
     bool raw;
     bool alt;
     int rows, cols;
-    int digit; /* 0..9 when the last key was PK_DIGIT */
+    int digit;        /* 0..9 when the last key was PK_DIGIT */
     unsigned char ch; /* printable byte when the last key was PK_CHAR */
 };
 

@@ -372,8 +372,8 @@ static bool search_backward_doc(struct view *v, const char *pattern,
     return false;
 }
 
-static bool search_doc(struct view *v, int dir, size_t start_L,
-                       size_t boundary, struct search_hit *hit)
+static bool search_doc(struct view *v, int dir, size_t start_L, size_t boundary,
+                       struct search_hit *hit)
 {
     size_t pattern_len;
     const char *pattern = search_pattern(v->search, &pattern_len);
@@ -427,8 +427,7 @@ static bool search_run_from(struct view *v, int dir, size_t start_L,
     return false;
 }
 
-static void search_refresh_entry(struct view *v,
-                                 const struct view_pos *origin)
+static void search_refresh_entry(struct view *v, const struct view_pos *origin)
 {
     if (v->search->entry_len == 0) {
         view_restore(v, origin);
@@ -859,20 +858,19 @@ static void static_doc_enter(struct view *v, struct paige_term *t,
                              const char *const *lines, size_t nlines)
 {
     struct static_doc sd = {lines, nlines};
-    paige_doc static_doc = { .ctx = &sd,
-                             .render_line = static_render_line,
-                             .title = title };
+    paige_doc static_doc = {
+        .ctx = &sd, .render_line = static_render_line, .title = title};
     struct search_state static_search = {0};
-    struct view sv = { .doc = &static_doc,
-                       .sl = v->sl,
-                       .width = t->cols,
-                       .chop = false,
-                       .hscroll = 0,
-                       .L = 0,
-                       .S = 0,
-                       .pending = -1,
-                       .stats = v->stats,
-                       .search = &static_search };
+    struct view sv = {.doc = &static_doc,
+                      .sl = v->sl,
+                      .width = t->cols,
+                      .chop = false,
+                      .hscroll = 0,
+                      .L = 0,
+                      .S = 0,
+                      .pending = -1,
+                      .stats = v->stats,
+                      .search = &static_search};
 
     for (;;) {
         draw(&sv, t, o);
@@ -977,24 +975,23 @@ static void perf_enter(struct view *v, struct paige_term *t, struct outbuf *o)
              v->L + 1, v->S, v->hscroll + 1, v->follow ? "yes" : "no");
     lines[n++] = pos;
     if (v->stats) {
-        snprintf(render, sizeof render,
-                 "render: calls=%llu frames=%llu rows=%llu",
-                 v->stats->render_calls, v->stats->frames,
-                 v->stats->rows_drawn);
+        snprintf(
+            render, sizeof render, "render: calls=%llu frames=%llu rows=%llu",
+            v->stats->render_calls, v->stats->frames, v->stats->rows_drawn);
         snprintf(output, sizeof output, "terminal: writes=%llu bytes=%llu",
                  v->stats->writes, v->stats->bytes_emitted);
         snprintf(search, sizeof search,
                  "search: scanned_lines=%llu hscroll_moves=%llu",
                  v->stats->search_lines, v->stats->hscroll_moves);
-        snprintf(follow, sizeof follow,
-                 "follow: refreshes=%llu updates=%llu",
+        snprintf(follow, sizeof follow, "follow: refreshes=%llu updates=%llu",
                  v->stats->follow_refreshes, v->stats->follow_updates);
         lines[n++] = render;
         lines[n++] = output;
         lines[n++] = search;
         lines[n++] = follow;
     } else {
-        lines[n++] = "stats unavailable: pass paige_opts.stats to collect counters";
+        lines[n++] =
+            "stats unavailable: pass paige_opts.stats to collect counters";
     }
     lines[n++] = "";
     snprintf(hint, sizeof hint, "bench: run sh bench/pager.sh --help");
@@ -1027,9 +1024,10 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
             nmatches = collect_matches(v, L, matches, SEARCH_MATCH_MAX);
         int content_w = view_content_width(v);
         unsigned flags = v->chop ? PAIGE_RENDER_CHOP : PAIGE_RENDER_WRAP;
-        int n = at_eof ? 0 : render_line_matches(v->doc, v->stats, v->sl, L,
-                                                  content_w, flags, v->hscroll,
-                                                  matches, nmatches);
+        int n = at_eof
+                    ? 0
+                    : render_line_matches(v->doc, v->stats, v->sl, L, content_w,
+                                          flags, v->hscroll, matches, nmatches);
         if (n == 0) {
             at_eof = true;
             ob_str(o, "~");
@@ -1059,24 +1057,21 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
         snprintf(num, sizeof num, "  %c%.*s%s%s ",
                  v->search->entry_dir == SEARCH_FORWARD ? '/' : '?',
                  (int)v->search->entry_len, v->search->entry,
-                 v->search->message[0] ? "  " : "",
-                 v->search->message);
+                 v->search->message[0] ? "  " : "", v->search->message);
     else if (v->message[0])
         snprintf(num, sizeof num, "  %s ", v->message);
     else if (v->search && v->search->message[0])
         snprintf(num, sizeof num, "  %s ", v->search->message);
     else if (v->follow && v->chop && v->follow_updates == 0)
-        snprintf(num, sizeof num,
-                 "  line %zu  col %zu  (FOLLOW waiting)%s ", v->L + 1,
-                 v->hscroll + 1, at_eof ? "  (END)" : "");
+        snprintf(num, sizeof num, "  line %zu  col %zu  (FOLLOW waiting)%s ",
+                 v->L + 1, v->hscroll + 1, at_eof ? "  (END)" : "");
     else if (v->follow && v->chop)
         snprintf(num, sizeof num,
-                 "  line %zu  col %zu  (FOLLOW updates %llu)%s ",
-                 v->L + 1, v->hscroll + 1, v->follow_updates,
-                 at_eof ? "  (END)" : "");
+                 "  line %zu  col %zu  (FOLLOW updates %llu)%s ", v->L + 1,
+                 v->hscroll + 1, v->follow_updates, at_eof ? "  (END)" : "");
     else if (v->follow && v->follow_updates == 0)
-        snprintf(num, sizeof num, "  line %zu  (FOLLOW waiting)%s ",
-                 v->L + 1, at_eof ? "  (END)" : "");
+        snprintf(num, sizeof num, "  line %zu  (FOLLOW waiting)%s ", v->L + 1,
+                 at_eof ? "  (END)" : "");
     else if (v->follow)
         snprintf(num, sizeof num, "  line %zu  (FOLLOW updates %llu)%s ",
                  v->L + 1, v->follow_updates, at_eof ? "  (END)" : "");
@@ -1144,17 +1139,17 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
 
     paige_term_enter(&t);
     struct search_state search = {0};
-    struct view v = { .doc = doc,
-                      .sl = &sl,
-                      .width = t.cols,
-                      .chop = opts && opts->chop_long_lines &&
-                              doc->render_line_ex,
-                      .hscroll = 0,
-                      .L = 0,
-                      .S = 0,
-                      .pending = -1,
-                      .stats = stats,
-                      .search = &search };
+    struct view v = {.doc = doc,
+                     .sl = &sl,
+                     .width = t.cols,
+                     .chop =
+                         opts && opts->chop_long_lines && doc->render_line_ex,
+                     .hscroll = 0,
+                     .L = 0,
+                     .S = 0,
+                     .pending = -1,
+                     .stats = stats,
+                     .search = &search};
     struct outbuf o = {0};
 
     /* Pause between digits: a wait longer than this commits the running number

@@ -95,13 +95,13 @@ int main(void)
         "Press /raw, 50%, left/right arrows, h, P, or q.",
     };
     struct mem_doc d = {lines, sizeof lines / sizeof lines[0]};
-    paige_doc doc = { .ctx = &d,
-                      .render_line = render_line,
-                      .title = "memory example",
-                      .raw_line = raw_line,
-                      .render_line_ex = render_line_ex,
-                      .line_count = line_count };
-    paige_opts opts = { .chop_long_lines = 1 };
+    paige_doc doc = {.ctx = &d,
+                     .render_line = render_line,
+                     .title = "memory example",
+                     .raw_line = raw_line,
+                     .render_line_ex = render_line_ex,
+                     .line_count = line_count};
+    paige_opts opts = {.chop_long_lines = 1};
     if (paige_run(&doc, &opts) < 0) {
         for (size_t i = 0; i < d.nlines; i++) {
             (void)!write(STDOUT_FILENO, d.lines[i], strlen(d.lines[i]));

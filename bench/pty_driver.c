@@ -31,11 +31,10 @@ static double now_ms(void)
 
 static void usage(void)
 {
-    fprintf(stderr,
-            "usage:\n"
-            "  pty_driver first NAME -- COMMAND [ARG...]\n"
-            "  pty_driver jump NAME -- COMMAND [ARG...]\n"
-            "  pty_driver search NAME NEEDLE -- COMMAND [ARG...]\n");
+    fprintf(stderr, "usage:\n"
+                    "  pty_driver first NAME -- COMMAND [ARG...]\n"
+                    "  pty_driver jump NAME -- COMMAND [ARG...]\n"
+                    "  pty_driver search NAME NEEDLE -- COMMAND [ARG...]\n");
 }
 
 static int find_sep(int argc, char **argv, int start)
@@ -192,7 +191,7 @@ int main(int argc, char **argv)
         status = "no-output";
     printf("bench mode=%s name=%s elapsed_ms=%.3f first_ms=%.3f "
            "rss_max=%ld pty_bytes=%zu pty_reads=%zu status=%s\n",
-           mode, name, elapsed_ms, first_ms, ru.ru_maxrss, pty_bytes,
-           pty_reads, status);
+           mode, name, elapsed_ms, first_ms, ru.ru_maxrss, pty_bytes, pty_reads,
+           status);
     return strcmp(status, "ok") == 0 ? 0 : 1;
 }
