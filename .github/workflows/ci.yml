@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [trunk, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx install clang-format==19.1.7
+      - run: clang-format --dry-run -Werror src/*.c src/*.h include/*.h
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, cc: gcc }
+          - { os: ubuntu-latest, cc: clang }
+          - { os: macos-latest, cc: clang }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (warnings are errors)
+        run: make CFLAGS="-std=c11 -O2 -Werror"
+      - name: Test
+        run: make test
+
+  freebsd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          run: |
+            make CFLAGS="-std=c11 -O2 -Werror"
+            make test
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      CC: clang
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with ASan/UBSan and run PTY tests
+        run: make CFLAGS="-std=c11 -O2 -g -fsanitize=address,undefined" && make test
+
+  all-jobs:
+    if: always()
+    needs: [lint, build, freebsd, sanitizers]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          result='${{ join(needs.*.result, ' ') }}'
+          echo "results: $result"
+          for r in $result; do
+            [ "$r" = "success" ] || { echo "a required job failed"; exit 1; }
+          done
+          echo "all required jobs passed"
