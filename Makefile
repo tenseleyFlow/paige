@@ -35,10 +35,13 @@ paige-demo: build/demo.o build/libpaige.a
 test: paige-demo
 	sh tests/run.sh
 
+bench-smoke: paige-demo
+	sh bench/pager.sh --smoke
+
 fmt:
 	clang-format -i src/*.c src/*.h include/*.h
 
 clean:
 	rm -rf build paige-demo tests/build
 
-.PHONY: all test fmt clean
+.PHONY: all test bench-smoke fmt clean

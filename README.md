@@ -54,11 +54,15 @@ path for upcoming features:
 ```sh
 make            # builds build/libpaige.a and the paige-demo binary
 make test       # PTY-driven interactive tests
+make bench-smoke # tiny benchmark script health check
 ./paige-demo FILE   # a minimal standalone pager
 ```
 
 No external dependencies. C11 + POSIX (termios), portable across Linux, macOS,
 and the BSDs.
+
+For local performance work, run `sh bench/pager.sh --help`. Full benchmarks are
+manual and fixture-backed; normal CI/test runs stay fast.
 
 ## Keys
 `q` quit · `j`/`k`/`↑`/`↓` line · space/`f`/`b` page · `d`/`u` half-page ·

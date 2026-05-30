@@ -1,6 +1,8 @@
 /build/
 /paige-demo
 /tests/build/
+/bench/build/
+/bench/.fixtures/
 *.o
 *.a
 *.swp
