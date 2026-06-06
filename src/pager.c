@@ -88,10 +88,10 @@ static int render_line_matches(const paige_doc *doc, paige_stats *stats,
                                struct seglist *sl, size_t L, int w,
                                unsigned flags, size_t hscroll,
                                const paige_match *matches, size_t nmatches,
-                               size_t seg_first, size_t seg_max)
+                               size_t seg_first, size_t seg_max, int appended)
 {
-    paige_render_req req = {L,       w,        flags,     hscroll,
-                            matches, nmatches, seg_first, seg_max};
+    paige_render_req req = {L,        w,         flags,   hscroll, matches,
+                            nmatches, seg_first, seg_max, appended};
     return render_req(doc, stats, sl, &req);
 }
 
@@ -100,7 +100,7 @@ static int render_line(const paige_doc *doc, paige_stats *stats,
                        struct seglist *sl, size_t L, int w)
 {
     return render_line_matches(doc, stats, sl, L, w, PAIGE_RENDER_WRAP, 0, NULL,
-                               0, 0, 0);
+                               0, 0, 0, 0);
 }
 
 /* ---- an output accumulator we flush to the terminal in one write ---- */
@@ -229,6 +229,8 @@ struct view {
     size_t hscroll;
     bool follow;
     unsigned long long follow_updates;
+    size_t follow_new_from; /* first newly-appended line (follow highlight) */
+    bool follow_has_new;
     size_t L;     /* top logical line */
     int S;        /* top visual segment within L */
     long pending; /* number being typed for goto, or -1 when not entering */
@@ -762,7 +764,7 @@ static int segcount(struct view *v, size_t L)
         return render_line(v->doc, v->stats, v->sl, L, v->width);
     return render_line_matches(v->doc, v->stats, v->sl, L,
                                view_content_width(v), PAIGE_RENDER_CHOP,
-                               v->hscroll, NULL, 0, 0, 0);
+                               v->hscroll, NULL, 0, 0, 0, 0);
 }
 
 static void move_down(struct view *v, int k)
@@ -882,11 +884,21 @@ static bool follow_refresh(struct view *v, int body)
         return false;
     if (v->stats)
         v->stats->follow_refreshes++;
+    size_t before = 0;
+    bool counted =
+        v->doc->line_count && v->doc->line_count(v->doc->ctx, &before);
     if (!v->doc->refresh(v->doc->ctx))
         return false;
     if (v->stats)
         v->stats->follow_updates++;
     v->follow_updates++;
+    /* Mark the freshly-appended lines so draw() can highlight them. */
+    size_t after = 0;
+    if (counted && v->doc->line_count &&
+        v->doc->line_count(v->doc->ctx, &after) && after > before) {
+        v->follow_new_from = before;
+        v->follow_has_new = true;
+    }
     goto_bottom(v, body);
     return true;
 }
@@ -906,6 +918,7 @@ static void follow_start(struct view *v, int body)
 static void follow_pause(struct view *v)
 {
     v->follow = false;
+    v->follow_has_new = false; /* the new-line highlight is transient */
 }
 
 static void move_left(struct view *v, size_t cols)
@@ -1403,9 +1416,12 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
      * emission (sl->n == total) and index from S instead of from 0. */
     while (row < body && !at_eof) {
         nmatches = collect_matches(v, L, matches, SEARCH_MATCH_MAX);
-        int total = render_line_matches(v->doc, v->stats, v->sl, L, content_w,
-                                        flags, v->hscroll, matches, nmatches,
-                                        (size_t)S, (size_t)(body - row));
+        int appended =
+            (v->follow_has_new && !v->filtered && L >= v->follow_new_from) ? 1
+                                                                           : 0;
+        int total = render_line_matches(
+            v->doc, v->stats, v->sl, L, content_w, flags, v->hscroll, matches,
+            nmatches, (size_t)S, (size_t)(body - row), appended);
         if (total == 0) {
             at_eof = true;
             break;
@@ -1509,7 +1525,7 @@ static void print_plain(const paige_doc *doc, paige_stats *stats,
         /* Emit every segment (seg_max = all), not count-only — print_plain
          * actually writes the seglist, unlike segcount. */
         int n = render_line_matches(doc, stats, sl, L, width, PAIGE_RENDER_WRAP,
-                                    0, NULL, 0, 0, (size_t)-1);
+                                    0, NULL, 0, 0, (size_t)-1, 0);
         if (n == 0)
             break;
         for (int i = 0; i < sl->n; i++) {

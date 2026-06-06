@@ -57,6 +57,9 @@ typedef struct paige_render_req {
      */
     size_t seg_first;
     size_t seg_max;
+    /* Nonzero when this line was just appended in follow mode; the renderer may
+     * draw it specially (e.g. bold) to highlight what is new. */
+    int appended;
 } paige_render_req;
 
 typedef struct paige_stats {

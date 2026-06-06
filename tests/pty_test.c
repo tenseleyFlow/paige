@@ -510,6 +510,12 @@ int main(void)
         pty_dump_visible(buf);
         fails++;
     }
+    /* the freshly-appended line is highlighted (bold). */
+    if (!pty_has(buf, "\x1b[1mfollow-new")) {
+        printf("FAIL: appended follow line was not highlighted\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
     pty_send_text(master, "k"); /* manual navigation pauses follow */
     pty_drain(master, buf, sizeof buf, 300);
     ffd = open(follow_tmpl, O_WRONLY | O_APPEND);

@@ -131,6 +131,26 @@ static void emit_highlighted(struct doc *d, paige_sink *sink, const char *bytes,
     paige_emit(sink, out, out_len);
 }
 
+/* Emit one segment wrapped in bold, to highlight a freshly-appended line. */
+static void emit_appended(struct doc *d, paige_sink *sink, const char *bytes,
+                          size_t len)
+{
+    size_t need = len + 8; /* \x1b[1m (4) + \x1b[0m (4) */
+    if (d->hlcap < need) {
+        char *nb = realloc(d->hlbuf, need);
+        if (!nb) {
+            paige_emit(sink, bytes, len);
+            return;
+        }
+        d->hlbuf = nb;
+        d->hlcap = need;
+    }
+    memcpy(d->hlbuf, "\x1b[1m", 4);
+    memcpy(d->hlbuf + 4, bytes, len);
+    memcpy(d->hlbuf + 4 + len, "\x1b[0m", 4);
+    paige_emit(sink, d->hlbuf, len + 8);
+}
+
 static int render_line_ex(void *ctx, const paige_render_req *req,
                           paige_sink *sink)
 {
@@ -162,8 +182,11 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
             size_t off = req->hscroll < len ? req->hscroll : len;
             size_t chunk =
                 len - off < (size_t)width ? len - off : (size_t)width;
-            emit_highlighted(d, sink, d->data + start + off, off, chunk,
-                             matches, nmatches);
+            if (req->appended)
+                emit_appended(d, sink, d->data + start + off, chunk);
+            else
+                emit_highlighted(d, sink, d->data + start + off, off, chunk,
+                                 matches, nmatches);
         }
         return 1;
     }
@@ -176,8 +199,11 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
     for (size_t s = req->seg_first; s < total && emitted < req->seg_max; s++) {
         size_t i = s * (size_t)width;
         size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
-        emit_highlighted(d, sink, d->data + start + i, i, chunk, matches,
-                         nmatches);
+        if (req->appended)
+            emit_appended(d, sink, d->data + start + i, chunk);
+        else
+            emit_highlighted(d, sink, d->data + start + i, i, chunk, matches,
+                             nmatches);
         emitted++;
     }
     return (int)total;
