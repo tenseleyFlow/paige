@@ -45,6 +45,7 @@ enum paige_key {
     PK_RULER,
     PK_LANDMARK_NEXT,
     PK_LANDMARK_PREV,
+    PK_FILTER,
     PK_LEFT,
     PK_RIGHT,
     PK_HOME,

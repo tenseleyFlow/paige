@@ -203,13 +203,27 @@ struct mark {
     struct view_pos pos;
 };
 
+/* When a filter is active the engine pages this wrapper document, which maps a
+ * filtered line index to a real line in the underlying document. */
+struct filter_ctx {
+    const paige_doc *real;
+    const size_t *map;
+    size_t n;
+};
+
 struct view {
     const paige_doc *doc;
     struct seglist *sl;
     int tty_fd; /* for cancelling a long search; <=0 disables */
     int width;
     bool chop;
-    bool ruler; /* show a column ruler row (chop mode) */
+    bool ruler;                /* show a column ruler row (chop mode) */
+    const paige_doc *real_doc; /* the unfiltered document */
+    bool filtered;
+    size_t *filter_map; /* filtered index -> real line */
+    size_t filter_n, filter_cap;
+    struct filter_ctx fctx;
+    paige_doc fdoc;
     size_t hscroll;
     bool follow;
     unsigned long long follow_updates;
@@ -946,6 +960,111 @@ static void landmark_jump(struct view *v, int dir)
     }
 }
 
+/* ---- reversible filter: page only the lines matching a pattern ---- */
+
+static int filter_render_ex(void *ctx, const paige_render_req *req,
+                            paige_sink *sink)
+{
+    struct filter_ctx *f = ctx;
+    if (req->lineno >= f->n)
+        return 0;
+    paige_render_req r = *req;
+    r.lineno = f->map[req->lineno];
+    if (f->real->render_line_ex)
+        return f->real->render_line_ex(f->real->ctx, &r, sink);
+    if (f->real->render_line)
+        return f->real->render_line(f->real->ctx, r.lineno, r.width, sink);
+    return 0;
+}
+
+static int filter_raw(void *ctx, size_t L, paige_line *out)
+{
+    struct filter_ctx *f = ctx;
+    if (L >= f->n || !f->real->raw_line)
+        return 0;
+    return f->real->raw_line(f->real->ctx, f->map[L], out);
+}
+
+static int filter_count(void *ctx, size_t *out)
+{
+    struct filter_ctx *f = ctx;
+    *out = f->n;
+    return 1;
+}
+
+/* Build the filtered index: real lines whose text matches `pat`. O(document),
+ * interruptible. */
+static bool build_filter(struct view *v, const char *pat, size_t plen)
+{
+    bool cs = paige_search_smart_case(pat, plen);
+    paige_line line;
+    size_t n = 0, scanned = 0, off;
+    const paige_doc *rd = v->real_doc;
+    if (!rd->raw_line)
+        return false;
+    for (size_t L = 0; rd->raw_line(rd->ctx, L, &line); L++) {
+        if (paige_search_find_forward(line.bytes, line.len, pat, plen, 0, cs,
+                                      &off)) {
+            if (n == v->filter_cap) {
+                size_t cap = v->filter_cap ? v->filter_cap * 2 : 256;
+                size_t *m = realloc(v->filter_map, cap * sizeof *m);
+                if (!m)
+                    return false;
+                v->filter_map = m;
+                v->filter_cap = cap;
+            }
+            v->filter_map[n++] = L;
+        }
+        if (scan_should_stop(v, &scanned, SEARCH_SCAN_ALL))
+            break;
+    }
+    v->filter_n = n;
+    return true;
+}
+
+/* Toggle a reversible filter to the current search pattern: page only the
+ * matching lines. A second press restores the full document. */
+static void filter_toggle(struct view *v)
+{
+    if (v->filtered) {
+        v->filtered = false;
+        v->doc = v->real_doc;
+        v->L = 0;
+        v->S = 0;
+        v->hscroll = 0;
+        view_set_message(v, "filter cleared");
+        return;
+    }
+    size_t plen = v->search ? v->search->pattern_len : 0;
+    if (plen == 0) {
+        view_set_message(v, "search first, then & to filter");
+        return;
+    }
+    if (!build_filter(v, v->search->pattern, plen) || v->filter_n == 0) {
+        view_set_message(v, "filter: no matches");
+        return;
+    }
+    /* The active match position is a real-line index; it has no meaning in the
+     * filtered view, so drop it (the user can search again within the filter).
+     */
+    v->search->active = false;
+    v->search->total = 0;
+    v->fctx.real = v->real_doc;
+    v->fctx.map = v->filter_map;
+    v->fctx.n = v->filter_n;
+    v->fdoc = (paige_doc){.ctx = &v->fctx,
+                          .render_line_ex = filter_render_ex,
+                          .raw_line = filter_raw,
+                          .line_count = filter_count,
+                          .title = v->real_doc->title};
+    v->doc = &v->fdoc;
+    v->filtered = true;
+    v->L = 0;
+    v->S = 0;
+    v->hscroll = 0;
+    view_set_message(v, "filtered");
+}
+
 static void mark_set(struct view *v, unsigned char mark)
 {
     view_save(v, &v->marks[mark].pos);
@@ -1392,6 +1511,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
     paige_term_enter(&t);
     struct search_state search = {0};
     struct view v = {.doc = doc,
+                     .real_doc = doc,
                      .sl = &sl,
                      .tty_fd = t.tty_fd,
                      .width = t.cols,
@@ -1529,6 +1649,11 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
             landmark_jump(&v, SEARCH_BACKWARD);
             dirty = true;
             break;
+        case PK_FILTER:
+            follow_pause(&v);
+            filter_toggle(&v);
+            dirty = true;
+            break;
         case PK_SEARCH_FWD:
             follow_pause(&v);
             view_clear_message(&v);
@@ -1620,5 +1745,6 @@ done:
     close(t.tty_fd);
     sl_free(&sl);
     free(o.p);
+    free(v.filter_map);
     return 0;
 }

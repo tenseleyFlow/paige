@@ -251,6 +251,8 @@ int paige_term_decode_command_byte(struct paige_term *t, unsigned char c)
         return PK_LANDMARK_NEXT;
     case '[':
         return PK_LANDMARK_PREV;
+    case '&':
+        return PK_FILTER;
     case ' ':
     case 'f':
         return PK_PGDN;

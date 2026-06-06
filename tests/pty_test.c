@@ -838,6 +838,37 @@ int main(void)
     finish_demo(master, pid, buf, sizeof buf, &status);
     unlink(lm_tmpl);
 
+    /* Reversible filter: search, then & to page only the matching lines. */
+    pid = spawn_demo(&master, &ws, tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "line009", WAIT_MS);
+    pty_send_text(master, "/line05\n"); /* 10 matches: line050..line059 */
+    pty_wait_for(master, buf, sizeof buf, "[1/10]", WAIT_MS);
+    pty_send_text(master, "&"); /* filter to those lines */
+    pty_wait_for(master, buf, sizeof buf, "filtered", WAIT_MS);
+    /* the filtered view shows only matching lines (highlighted), not line001.
+     */
+    if (!pty_has(buf, "\x1b[7mline05") || pty_has(buf, "line001") ||
+        !pty_has(buf, "filtered")) {
+        printf("FAIL: filter did not restrict to matching lines\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "&"); /* reverse: restore the full document */
+    pty_wait_for(master, buf, sizeof buf, "filter cleared", WAIT_MS);
+    if (!pty_has(buf, "line001")) {
+        printf("FAIL: clearing the filter did not restore the document\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "q");
+    finish_demo(master, pid, buf, sizeof buf, &status);
+
     unlink(tmpl);
     unlink(follow_tmpl);
     unlink(chop_tmpl);
