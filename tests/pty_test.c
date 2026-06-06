@@ -190,6 +190,10 @@ int main(void)
         pty_dump_visible(buf);
         fails++;
     }
+    if (!pty_has(buf, "searching")) {
+        printf("FAIL: progressive 'searching...' status not shown\n");
+        fails++;
+    }
 
     pty_send_text(master, "n"); /* next match */
     pty_wait_for(master, buf, sizeof buf, "[2/10]", WAIT_MS);

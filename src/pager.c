@@ -644,10 +644,18 @@ static int search_enter(struct view *v, struct paige_term *t, struct outbuf *o,
                 /* Authoritative unbounded search from the origin: the live
                  * preview was bounded and may have missed a far match. */
                 view_restore(v, &origin);
+                /* Progressive status: paint "searching..." before the (possibly
+                 * long) full-document search + count, so the user isn't left
+                 * staring at a frozen frame on a huge file. */
+                view_set_message(v, "searching...");
+                draw(v, t, o);
+                write_counted(t->out_fd, o->p, o->len, v->stats);
                 bool found = search_run_from(
                     v, v->search->dir, origin.L,
                     v->search->dir == SEARCH_FORWARD ? 0 : (size_t)-1,
                     SEARCH_SCAN_ALL);
+                v->message[0] =
+                    '\0'; /* clear "searching..." (keep search msg) */
                 if (found) {
                     view_note_previous(v, &origin);
                     search_update_count(v);
