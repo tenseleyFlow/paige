@@ -105,3 +105,20 @@ fix). It now waits for the initial frame to settle, then times the response, so 
 stalled redraw is measured honestly. Driving mat through the minimal bench pty can
 stall briefly on mat's startup terminal probe; the driver's 15 s timeout caps it,
 which is why mat is a full-run-only subject and never part of the gate.
+
+### Campaign result (both gaps closed)
+
+Acting on the two conclusions:
+
+- **The demo is now lazy** (mmap + on-demand `memchr` index). Its first paint on
+  64 MiB dropped from ~130–180 ms to **~1.5 ms** — at/below `less` (~3.5 ms) — and
+  `host_indexed` stays a screenful (26) regardless of file size, gated on the
+  `first.*` cases so a regression to eager indexing trips CI.
+- **The `seek_end` hook closed the `G` gap** for hosts without `line_count`: it
+  takes them from forward-scan-render (render=100095 / ~1.19 s on 64 MiB) to a
+  jump-and-fill of **render=94 / ~37 ms** — the EOF-find cost only, on par with
+  `less` (~43 ms). The demo keeps a (now-lazy) `line_count` so `%` still works and
+  its `G` rides that path; `seek_end` is exercised via `PAIGE_NO_COUNT`.
+
+Net: paige is at first-paint parity with `less` and within noise on jump-to-bottom,
+with every deterministic signal gated in CI.
