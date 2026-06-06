@@ -109,7 +109,9 @@ void paige_term_enter(struct paige_term *t)
     struct sigaction fa;
     memset(&fa, 0, sizeof fa);
     fa.sa_handler = on_fatal;
-    fa.sa_flags = SA_RESETHAND; /* fire once, then default disposition */
+    /* SA_RESETHAND is 0x80000000 on glibc but sa_flags is a signed int; the
+     * cast is the documented bit pattern, not a value change. */
+    fa.sa_flags = (int)SA_RESETHAND; /* fire once, then default disposition */
     sigaction(SIGINT, &fa, NULL);
     sigaction(SIGTERM, &fa, NULL);
     sigaction(SIGQUIT, &fa, NULL);
