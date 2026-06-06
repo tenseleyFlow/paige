@@ -185,7 +185,10 @@ struct search_state {
     size_t active_L;
     size_t active_off;
     size_t active_len;
-    bool interrupted; /* last scan was cancelled by a keypress */
+    bool interrupted;  /* last scan was cancelled by a keypress */
+    bool wrapped_last; /* last activation wrapped past an edge */
+    size_t total; /* total matches of the current pattern (0 = none/unknown) */
+    size_t index; /* 1-based index of the active match within total */
     char message[SEARCH_STATUS_MAX];
 };
 
@@ -458,6 +461,7 @@ static void search_activate(struct view *v, const struct search_hit *hit)
     v->search->active_L = hit->L;
     v->search->active_off = hit->off;
     v->search->active_len = hit->len;
+    v->search->wrapped_last = hit->wrapped;
     v->L = hit->L;
     v->S = 0;
     if (v->chop) {
@@ -478,8 +482,63 @@ static void search_activate(struct view *v, const struct search_hit *hit)
 static void search_not_found(struct view *v)
 {
     v->search->active = false;
+    v->search->total = 0;
+    v->search->index = 0;
     snprintf(v->search->message, sizeof v->search->message,
              "pattern not found");
+}
+
+/* Count every occurrence of the active pattern in the document and the 1-based
+ * index of the match at (active_L, active_off). Interruptible — a keypress
+ * stops it and the partial count is returned. O(document), run once per
+ * pattern. */
+static size_t count_matches(struct view *v, size_t active_L, size_t active_off,
+                            size_t *index_out)
+{
+    size_t plen;
+    const char *pat = search_pattern(v->search, &plen);
+    *index_out = 0;
+    if (plen == 0 || !v->doc->raw_line)
+        return 0;
+    bool cs = paige_search_smart_case(pat, plen);
+    paige_line line;
+    size_t total = 0, scanned = 0;
+    for (size_t L = 0; raw_line(v->doc, L, &line); L++) {
+        size_t off = 0, m;
+        while (paige_search_find_forward(line.bytes, line.len, pat, plen, off,
+                                         cs, &m)) {
+            total++;
+            if (L < active_L || (L == active_L && m <= active_off))
+                *index_out = total;
+            off = m + plen; /* non-overlapping */
+        }
+        if (scan_should_stop(v, &scanned, SEARCH_SCAN_ALL))
+            break; /* cancelled: report the partial count */
+    }
+    return total;
+}
+
+/* Recompute total + active index for the committed pattern (one full scan). */
+static void search_update_count(struct view *v)
+{
+    v->search->total = count_matches(v, v->search->active_L,
+                                     v->search->active_off, &v->search->index);
+}
+
+/* Advance the 1-based match index after an n/N step, using the wrap flag the
+ * scan recorded (O(1), no rescan). */
+static void search_step_index(struct view *v, int dir)
+{
+    if (v->search->total == 0)
+        return;
+    if (v->search->wrapped_last)
+        v->search->index = (dir == SEARCH_FORWARD) ? 1 : v->search->total;
+    else if (dir == SEARCH_FORWARD)
+        v->search->index =
+            v->search->index < v->search->total ? v->search->index + 1 : 1;
+    else
+        v->search->index =
+            v->search->index > 1 ? v->search->index - 1 : v->search->total;
 }
 
 static bool search_run_from(struct view *v, int dir, size_t start_L,
@@ -588,8 +647,10 @@ static int search_enter(struct view *v, struct paige_term *t, struct outbuf *o,
                     v, v->search->dir, origin.L,
                     v->search->dir == SEARCH_FORWARD ? 0 : (size_t)-1,
                     SEARCH_SCAN_ALL);
-                if (found)
+                if (found) {
                     view_note_previous(v, &origin);
+                    search_update_count(v);
+                }
             }
             return PK_NONE;
         }
@@ -632,8 +693,10 @@ static void search_repeat(struct view *v, int dir)
         found = search_run_from(v, SEARCH_BACKWARD, start_L, before,
                                 SEARCH_SCAN_ALL);
     }
-    if (found)
+    if (found) {
         view_note_previous(v, &origin);
+        search_step_index(v, dir);
+    }
 }
 
 static size_t collect_matches(struct view *v, size_t L, paige_match *matches,
@@ -1201,6 +1264,14 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
         snprintf(num, sizeof num, "  line %zu%s ", v->L + 1,
                  at_eof ? "  (END)" : "");
     ob_str(o, num);
+    /* search overview: which match of how many. */
+    if (v->search && v->search->active && v->search->total > 0 &&
+        !v->search->entering && v->search->message[0] == '\0') {
+        char minfo[48];
+        snprintf(minfo, sizeof minfo, " [%zu/%zu] ", v->search->index,
+                 v->search->total);
+        ob_str(o, minfo);
+    }
     ob_str(o, "\x1b[0m");
     return at_eof;
 }

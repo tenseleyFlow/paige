@@ -174,8 +174,8 @@ int main(void)
         fails++;
     }
 
-    pty_send_text(master, "/line05\n"); /* forward search */
-    pty_wait_for(master, buf, sizeof buf, "line 50", WAIT_MS);
+    pty_send_text(master, "/line05\n"); /* forward search; line050..059 = 10 */
+    pty_wait_for(master, buf, sizeof buf, "[1/10]", WAIT_MS);
     if (!pty_has(buf, "line 50")) {
         printf("FAIL: search for line05 did not land on line 50\n");
         pty_dump_visible(buf);
@@ -185,19 +185,24 @@ int main(void)
         printf("FAIL: search highlight missing\n");
         fails++;
     }
+    if (!pty_has(buf, "[1/10]")) {
+        printf("FAIL: search overview did not show match 1 of 10\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
 
     pty_send_text(master, "n"); /* next match */
-    pty_wait_for(master, buf, sizeof buf, "line 51", WAIT_MS);
-    if (!pty_has(buf, "line 51")) {
-        printf("FAIL: 'n' did not advance to next search match\n");
+    pty_wait_for(master, buf, sizeof buf, "[2/10]", WAIT_MS);
+    if (!pty_has(buf, "line 51") || !pty_has(buf, "[2/10]")) {
+        printf("FAIL: 'n' did not advance to match 2 of 10\n");
         pty_dump_visible(buf);
         fails++;
     }
 
     pty_send_text(master, "N"); /* previous match */
-    pty_wait_for(master, buf, sizeof buf, "line 50", WAIT_MS);
-    if (!pty_has(buf, "line 50")) {
-        printf("FAIL: 'N' did not return to previous search match\n");
+    pty_wait_for(master, buf, sizeof buf, "[1/10]", WAIT_MS);
+    if (!pty_has(buf, "line 50") || !pty_has(buf, "[1/10]")) {
+        printf("FAIL: 'N' did not return to match 1 of 10\n");
         pty_dump_visible(buf);
         fails++;
     }
