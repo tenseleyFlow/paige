@@ -82,6 +82,27 @@ static pid_t spawn_demo(int *master, struct winsize *ws, const char *path)
     return pid;
 }
 
+/* Spawn the demo on two files, for the multi-document (:n / :p) test. */
+static pid_t spawn_demo2(int *master, struct winsize *ws, const char *p1,
+                         const char *p2)
+{
+    pid_t pid = forkpty(master, NULL, NULL, ws);
+    if (pid < 0) {
+        if (getenv("PAIGE_TEST_STRICT")) {
+            fprintf(stderr, "FAIL: forkpty: %s (PAIGE_TEST_STRICT)\n",
+                    strerror(errno));
+            return -1;
+        }
+        printf("skip - pty unavailable (%s)\n", strerror(errno));
+        exit(0);
+    }
+    if (pid == 0) {
+        execl("./paige-demo", "paige-demo", p1, p2, (char *)NULL);
+        _exit(127);
+    }
+    return pid;
+}
+
 static void finish_demo(int master, pid_t pid, char *buf, size_t cap,
                         int *status)
 {
@@ -868,6 +889,50 @@ int main(void)
     }
     pty_send_text(master, "q");
     finish_demo(master, pid, buf, sizeof buf, &status);
+
+    /* Multiple documents: :n / :p switch between files. */
+    char doc2_tmpl[4096];
+    mk_tmpl(doc2_tmpl, sizeof doc2_tmpl, "paige_doc2_XXXXXX");
+    int d2fd = mkstemp(doc2_tmpl);
+    if (d2fd < 0) {
+        perror("mkstemp");
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        return 1;
+    }
+    for (int i = 1; i <= 20; i++) {
+        char line[32];
+        int m = snprintf(line, sizeof line, "DOCTWO line %02d\n", i);
+        (void)!write(d2fd, line, (size_t)m);
+    }
+    close(d2fd);
+    pid = spawn_demo2(&master, &ws, tmpl, doc2_tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        unlink(doc2_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "line001", WAIT_MS); /* first doc */
+    pty_send_text(master, ":n");                               /* next file */
+    pty_wait_for(master, buf, sizeof buf, "DOCTWO", WAIT_MS);
+    if (!pty_has(buf, "DOCTWO") || pty_has(buf, "line001")) {
+        printf("FAIL: :n did not switch to the second document\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, ":p"); /* previous file */
+    pty_wait_for(master, buf, sizeof buf, "line001", WAIT_MS);
+    if (!pty_has(buf, "line001") || pty_has(buf, "DOCTWO")) {
+        printf("FAIL: :p did not switch back to the first document\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "q");
+    finish_demo(master, pid, buf, sizeof buf, &status);
+    unlink(doc2_tmpl);
 
     unlink(tmpl);
     unlink(follow_tmpl);

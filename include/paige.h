@@ -143,4 +143,11 @@ typedef struct paige_opts {
  */
 int paige_run(const paige_doc *doc, const paige_opts *opts);
 
+/*
+ * Page an ordered set of documents, switchable with `:n` / `:p`. Equivalent to
+ * paige_run() when ndocs == 1. Returns 0 on a normal quit, or -1 if there is no
+ * usable controlling terminal.
+ */
+int paige_run_many(const paige_doc *docs, size_t ndocs, const paige_opts *opts);
+
 #endif /* PAIGE_H */

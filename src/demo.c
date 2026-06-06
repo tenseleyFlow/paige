@@ -305,41 +305,61 @@ static int refresh_doc(void *ctx)
     return 1;
 }
 
+/* Slurp + index `path` (NULL = stdin) and fill a paige_doc for it. */
+static int fill_doc(struct doc *d, paige_doc *pd, const char *path)
+{
+    memset(d, 0, sizeof *d);
+    d->data = slurp(path, &d->size);
+    if (!d->data)
+        return 0;
+    d->title = path ? path : "stdin";
+    d->path = path;
+    index_lines(d);
+    *pd = (paige_doc){.ctx = d,
+                      .render_line = render_line,
+                      .title = d->title,
+                      .raw_line = raw_line,
+                      .line_count = line_count,
+                      .render_line_ex = render_line_ex,
+                      .refresh = refresh_doc,
+                      .landmark = landmark};
+    if (getenv("PAIGE_NO_RAW"))
+        pd->raw_line = NULL;
+    if (getenv("PAIGE_NO_COUNT"))
+        pd->line_count = NULL;
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
-    const char *path = argc > 1 ? argv[1] : NULL;
-    if (path && (strcmp(path, "--version") == 0 || strcmp(path, "-V") == 0)) {
+    if (argc > 1 &&
+        (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
         printf("paige-demo (paige %d.%d.%d)\n", PAIGE_VERSION_MAJOR,
                PAIGE_VERSION_MINOR, PAIGE_VERSION_PATCH);
         return 0;
     }
-    if (path == NULL && isatty(STDIN_FILENO)) {
-        fprintf(stderr, "usage: paige-demo FILE (or pipe content on stdin)\n");
+    if (argc < 2 && isatty(STDIN_FILENO)) {
+        fprintf(stderr,
+                "usage: paige-demo FILE... (or pipe content on stdin)\n");
         return 2;
     }
-    struct doc d;
-    memset(&d, 0, sizeof d);
-    d.data = slurp(path, &d.size);
-    if (d.data == NULL) {
-        fprintf(stderr, "paige-demo: cannot read %s\n", path ? path : "stdin");
+
+    size_t ndocs = argc > 1 ? (size_t)(argc - 1) : 1; /* stdin counts as 1 */
+    struct doc *d = calloc(ndocs, sizeof *d);
+    paige_doc *docs = calloc(ndocs, sizeof *docs);
+    if (!d || !docs) {
+        perror("calloc");
         return 1;
     }
-    d.title = path ? path : "stdin";
-    d.path = path;
-    index_lines(&d);
+    for (size_t i = 0; i < ndocs; i++) {
+        const char *path = argc > 1 ? argv[i + 1] : NULL;
+        if (!fill_doc(&d[i], &docs[i], path)) {
+            fprintf(stderr, "paige-demo: cannot read %s\n",
+                    path ? path : "stdin");
+            return 1;
+        }
+    }
 
-    paige_doc doc = {.ctx = &d,
-                     .render_line = render_line,
-                     .title = d.title,
-                     .raw_line = raw_line,
-                     .line_count = line_count,
-                     .render_line_ex = render_line_ex,
-                     .refresh = refresh_doc,
-                     .landmark = landmark};
-    if (getenv("PAIGE_NO_RAW"))
-        doc.raw_line = NULL;
-    if (getenv("PAIGE_NO_COUNT"))
-        doc.line_count = NULL;
     paige_stats stats = {0};
     paige_opts opts = {.quit_if_one_screen = 1};
     if (getenv("PAIGE_CHOP"))
@@ -354,9 +374,9 @@ int main(int argc, char **argv)
     const char *fms = getenv("PAIGE_FOLLOW_MS");
     if (fms)
         opts.follow_poll_ms = atoi(fms);
-    if (paige_run(&doc, &opts) < 0) {
-        /* No terminal: dump plainly. */
-        (void)!write(STDOUT_FILENO, d.data, d.size);
+    if (paige_run_many(docs, ndocs, &opts) < 0) {
+        /* No terminal: dump the first document plainly. */
+        (void)!write(STDOUT_FILENO, d[0].data, d[0].size);
     }
     if (show_stats) {
         fprintf(
@@ -369,8 +389,12 @@ int main(int argc, char **argv)
             stats.hscroll_moves, stats.follow_refreshes, stats.follow_updates,
             stats.segments_emitted);
     }
-    free(d.data);
-    free(d.line);
-    free(d.hlbuf);
+    for (size_t i = 0; i < ndocs; i++) {
+        free(d[i].data);
+        free(d[i].line);
+        free(d[i].hlbuf);
+    }
+    free(d);
+    free(docs);
     return 0;
 }

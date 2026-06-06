@@ -224,6 +224,8 @@ struct view {
     size_t filter_n, filter_cap;
     struct filter_ctx fctx;
     paige_doc fdoc;
+    const paige_doc *docs; /* multi-document set (:n / :p) */
+    size_t ndocs, doc_idx;
     size_t hscroll;
     bool follow;
     unsigned long long follow_updates;
@@ -1065,6 +1067,51 @@ static void filter_toggle(struct view *v)
     view_set_message(v, "filtered");
 }
 
+/* ---- multiple documents (:n / :p) ---- */
+
+static void doc_switch(struct view *v, int delta)
+{
+    if (v->ndocs <= 1) {
+        view_set_message(v, "single document");
+        return;
+    }
+    size_t ni = v->doc_idx;
+    if (delta > 0 && v->doc_idx + 1 < v->ndocs)
+        ni = v->doc_idx + 1;
+    else if (delta < 0 && v->doc_idx > 0)
+        ni = v->doc_idx - 1;
+    if (ni == v->doc_idx) {
+        view_set_message(v, delta > 0 ? "last document" : "first document");
+        return;
+    }
+    v->doc_idx = ni;
+    v->filtered = false;
+    v->real_doc = &v->docs[ni];
+    v->doc = v->real_doc;
+    v->L = 0;
+    v->S = 0;
+    v->hscroll = 0;
+    if (v->search) {
+        v->search->active = false;
+        v->search->total = 0;
+    }
+    view_set_message(v, "%s  (%zu/%zu)",
+                     v->doc->title ? v->doc->title : "document", ni + 1,
+                     v->ndocs);
+}
+
+/* `:` prefix: read one key and switch documents (n = next, p = previous). */
+static void filecmd_enter(struct view *v, struct paige_term *t)
+{
+    int k = paige_term_key_input(t);
+    if (k == PK_CHAR && t->ch == 'n')
+        doc_switch(v, 1);
+    else if (k == PK_CHAR && t->ch == 'p')
+        doc_switch(v, -1);
+    else
+        view_set_message(v, "use :n / :p for next / prev file");
+}
+
 static void mark_set(struct view *v, unsigned char mark)
 {
     view_save(v, &v->marks[mark].pos);
@@ -1473,12 +1520,15 @@ static void print_plain(const paige_doc *doc, paige_stats *stats,
     }
 }
 
-int paige_run(const paige_doc *doc, const paige_opts *opts)
+int paige_run_many(const paige_doc *docs, size_t ndocs, const paige_opts *opts)
 {
     paige_stats *stats = opts ? opts->stats : NULL;
     if (stats)
         memset(stats, 0, sizeof *stats);
-    if (!doc || (!doc->render_line && !doc->render_line_ex))
+    if (!docs || ndocs == 0)
+        return -1;
+    const paige_doc *doc = &docs[0];
+    if (!doc->render_line && !doc->render_line_ex)
         return -1;
 
     struct paige_term t;
@@ -1487,8 +1537,9 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
 
     struct seglist sl = {0};
 
-    /* Quit-if-one-screen: if everything fits, just print it (no alt screen). */
-    if (opts && opts->quit_if_one_screen) {
+    /* Quit-if-one-screen: if everything fits, just print it (no alt screen).
+     * Only for a single document — multidoc needs the interactive loop. */
+    if (ndocs == 1 && opts && opts->quit_if_one_screen) {
         int visual = 0, fits = 1;
         for (size_t L = 0;; L++) {
             int n = render_line(doc, stats, &sl, L, t.cols);
@@ -1512,6 +1563,9 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
     struct search_state search = {0};
     struct view v = {.doc = doc,
                      .real_doc = doc,
+                     .docs = docs,
+                     .ndocs = ndocs,
+                     .doc_idx = 0,
                      .sl = &sl,
                      .tty_fd = t.tty_fd,
                      .width = t.cols,
@@ -1654,6 +1708,11 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
             filter_toggle(&v);
             dirty = true;
             break;
+        case PK_FILECMD:
+            follow_pause(&v);
+            filecmd_enter(&v, &t);
+            dirty = true;
+            break;
         case PK_SEARCH_FWD:
             follow_pause(&v);
             view_clear_message(&v);
@@ -1747,4 +1806,9 @@ done:
     free(o.p);
     free(v.filter_map);
     return 0;
+}
+
+int paige_run(const paige_doc *doc, const paige_opts *opts)
+{
+    return paige_run_many(doc, 1, opts);
 }
