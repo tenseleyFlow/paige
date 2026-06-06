@@ -864,8 +864,18 @@ static void goto_bottom(struct view *v, int body)
         move_up(v, body - 1);
         return;
     }
-    /* Unknown length (a streaming host with no line_count): we have to scan to
-     * find EOF, the same as `less +G` on a pipe. */
+    size_t last = 0;
+    if (v->doc->seek_end && v->doc->seek_end(v->doc->ctx, &last)) {
+        /* No line_count, but a seekable host can name the last line cheaply.
+         * Same O(screen) jump-and-fill as the known-length path. */
+        v->L = last;
+        int n = segcount(v, v->L);
+        v->S = n > 0 ? n - 1 : 0;
+        move_up(v, body - 1);
+        return;
+    }
+    /* Unknown length (a streaming host with neither line_count nor seek_end):
+     * we have to scan to find EOF, the same as `less +G` on a pipe. */
     if (segcount(v, v->L) == 0) {
         v->L = 0;
         v->S = 0;

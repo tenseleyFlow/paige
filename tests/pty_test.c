@@ -663,6 +663,57 @@ int main(void)
     }
     finish_demo(master, pid, buf, sizeof buf, &status);
 
+    /* Same O(screen) G WITHOUT a line_count: a seekable host that implements
+     * seek_end reaches the bottom just as cheaply. This is the path that
+     * matters for the production host (mat omits line_count), so gate it the
+     * same way. */
+    setenv("PAIGE_NO_COUNT", "1", 1);
+    pid = spawn_demo(&master, &ws, big_tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        unlink(big_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "L000001", WAIT_MS);
+    pty_send_text(master, "G");
+    pty_wait_for(master, buf, sizeof buf, "L100000", WAIT_MS);
+    pty_send_text(master, "q");
+    pty_wait_for(master, buf, sizeof buf, "paige-stats:", WAIT_MS);
+    long rc_se = stat_field(buf, "render=");
+    if (rc_se < 0 || rc_se > 1000) {
+        printf("FAIL: G via seek_end rendered %ld lines on a %d-line doc "
+               "(expected O(screen))\n",
+               rc_se, BIG_LINES);
+        fails++;
+    }
+    finish_demo(master, pid, buf, sizeof buf, &status);
+
+    /* With neither line_count nor seek_end, G falls back to the forward scan:
+     * it is no longer O(screen) but must still functionally reach the last
+     * line. */
+    setenv("PAIGE_NO_SEEK_END", "1", 1);
+    pid = spawn_demo(&master, &ws, big_tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        unlink(big_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "L000001", WAIT_MS);
+    pty_send_text(master, "G");
+    pty_wait_for(master, buf, sizeof buf, "L100000", WAIT_MS);
+    if (!pty_has(buf, "L100000")) {
+        printf("FAIL: forward-scan fallback G did not reach the last line\n");
+        fails++;
+    }
+    pty_send_text(master, "q");
+    finish_demo(master, pid, buf, sizeof buf, &status);
+    unsetenv("PAIGE_NO_SEEK_END");
+    unsetenv("PAIGE_NO_COUNT");
+
     /* A long unbounded search (committed with Enter) can be cancelled by a
      * keypress: send the pattern, Enter, and one extra byte in a single write.
      * The byte sits buffered; when the scan reaches its interrupt checkpoint it
