@@ -201,6 +201,38 @@ static int line_count(void *ctx, size_t *out)
     return 1;
 }
 
+/* A landmark is a structural marker a reader jumps between: a header (#) or an
+ * ERROR/WARN log line. A real host would recognize its own semantics. */
+static int is_landmark(struct doc *d, size_t L)
+{
+    size_t s, len;
+    if (!line_bounds(d, L, &s, &len))
+        return 0;
+    const char *p = d->data + s;
+    return (len >= 1 && p[0] == '#') ||
+           (len >= 5 && memcmp(p, "ERROR", 5) == 0) ||
+           (len >= 4 && memcmp(p, "WARN", 4) == 0);
+}
+
+static int landmark(void *ctx, size_t from, int dir, size_t *out)
+{
+    struct doc *d = ctx;
+    if (dir > 0) {
+        for (size_t L = from + 1; L < d->nlines; L++)
+            if (is_landmark(d, L)) {
+                *out = L;
+                return 1;
+            }
+    } else {
+        for (size_t L = from; L-- > 0;)
+            if (is_landmark(d, L)) {
+                *out = L;
+                return 1;
+            }
+    }
+    return 0;
+}
+
 static char *slurp(const char *path, size_t *out_size)
 {
     int fd = path ? open(path, O_RDONLY) : STDIN_FILENO;
@@ -302,7 +334,8 @@ int main(int argc, char **argv)
                      .raw_line = raw_line,
                      .line_count = line_count,
                      .render_line_ex = render_line_ex,
-                     .refresh = refresh_doc};
+                     .refresh = refresh_doc,
+                     .landmark = landmark};
     if (getenv("PAIGE_NO_RAW"))
         doc.raw_line = NULL;
     if (getenv("PAIGE_NO_COUNT"))

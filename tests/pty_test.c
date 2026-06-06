@@ -783,6 +783,61 @@ int main(void)
     }
     unlink(empty_tmpl);
 
+    /* Semantic jumps: ] / [ move to the next/prev host landmark (ERROR lines).
+     */
+    char lm_tmpl[4096];
+    mk_tmpl(lm_tmpl, sizeof lm_tmpl, "paige_lm_XXXXXX");
+    int lfd = mkstemp(lm_tmpl);
+    if (lfd < 0) {
+        perror("mkstemp");
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        return 1;
+    }
+    for (int i = 1; i <= 30; i++) {
+        char line[40];
+        int m;
+        if (i == 10)
+            m = snprintf(line, sizeof line, "ERROR alpha at %d\n", i);
+        else if (i == 20)
+            m = snprintf(line, sizeof line, "ERROR beta at %d\n", i);
+        else
+            m = snprintf(line, sizeof line, "row%02d\n", i);
+        (void)!write(lfd, line, (size_t)m);
+    }
+    close(lfd);
+    pid = spawn_demo(&master, &ws, lm_tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        unlink(lm_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "row01", WAIT_MS);
+    pty_send_text(master, "]"); /* next landmark */
+    pty_wait_for(master, buf, sizeof buf, "next landmark", WAIT_MS);
+    if (!pty_has(buf, "ERROR alpha") || !pty_has(buf, "next landmark")) {
+        printf("FAIL: ] did not jump to the next landmark\n");
+        fails++;
+    }
+    pty_send_text(master, "]"); /* next again */
+    pty_wait_for(master, buf, sizeof buf, "ERROR beta", WAIT_MS);
+    if (!pty_has(buf, "ERROR beta")) {
+        printf("FAIL: second ] did not advance to the next landmark\n");
+        fails++;
+    }
+    pty_send_text(master, "["); /* previous landmark */
+    pty_wait_for(master, buf, sizeof buf, "previous landmark", WAIT_MS);
+    if (!pty_has(buf, "ERROR alpha") || !pty_has(buf, "previous landmark")) {
+        printf("FAIL: [ did not jump to the previous landmark\n");
+        fails++;
+    }
+    pty_send_text(master, "q");
+    finish_demo(master, pid, buf, sizeof buf, &status);
+    unlink(lm_tmpl);
+
     unlink(tmpl);
     unlink(follow_tmpl);
     unlink(chop_tmpl);

@@ -924,6 +924,28 @@ static void jump_to_pos(struct view *v, const struct view_pos *pos)
     view_note_previous(v, &origin);
 }
 
+/* Semantic jump: ask the host for the next/prev landmark line and go there. */
+static void landmark_jump(struct view *v, int dir)
+{
+    if (!v->doc->landmark) {
+        view_set_message(v, "no landmarks");
+        return;
+    }
+    size_t target;
+    if (v->doc->landmark(v->doc->ctx, v->L, dir, &target)) {
+        struct view_pos origin;
+        view_save(v, &origin);
+        v->L = target;
+        v->S = 0;
+        v->hscroll = 0;
+        view_clamp(v);
+        view_note_previous(v, &origin);
+        view_set_message(v, dir > 0 ? "next landmark" : "previous landmark");
+    } else {
+        view_set_message(v, dir > 0 ? "no next landmark" : "no prev landmark");
+    }
+}
+
 static void mark_set(struct view *v, unsigned char mark)
 {
     view_save(v, &v->marks[mark].pos);
@@ -1495,6 +1517,16 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
             break;
         case PK_RULER:
             v.ruler = !v.ruler;
+            dirty = true;
+            break;
+        case PK_LANDMARK_NEXT:
+            follow_pause(&v);
+            landmark_jump(&v, SEARCH_FORWARD);
+            dirty = true;
+            break;
+        case PK_LANDMARK_PREV:
+            follow_pause(&v);
+            landmark_jump(&v, SEARCH_BACKWARD);
             dirty = true;
             break;
         case PK_SEARCH_FWD:

@@ -118,6 +118,13 @@ typedef struct paige_doc {
     /* Optional live-content refresh. Called while follow mode is active; return
      * nonzero when paige should redraw because content changed. */
     int (*refresh)(void *ctx);
+
+    /* Optional semantic jump. Set `out` to the next host-defined landmark line
+     * strictly past `from` in direction `dir` (>0 forward, <0 backward) and
+     * return nonzero, or return 0 if there is none. Lets `]`/`[` jump between
+     * meaningful points (errors, headers, diff hunks, timestamps, …) that only
+     * the host can recognize. */
+    int (*landmark)(void *ctx, size_t from, int dir, size_t *out);
 } paige_doc;
 
 typedef struct paige_opts {
