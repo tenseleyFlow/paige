@@ -24,8 +24,12 @@ Options:
   --keep-fixtures      keep generated fixtures under bench/.fixtures
   -h, --help           show this help
 
-Output is key=value rows. `less` rows are emitted only when less is installed.
-Fixtures are deterministic, non-sparse, non-zero text; /dev/zero is never used.
+Output is key=value rows. render=/segments=/search_lines= are paige's own stat
+counters (-1 for less/ov/moar) and isolate engine work from first_ms, which is
+end-to-end and includes the demo host's file slurp+index. Competitor rows
+(less/ov/moar) appear only when those tools are installed. Fixtures are this
+repo's real sources tiled to size (realistic line lengths and structure), never
+random or sparse; /dev/zero is never used.
 USAGE
 }
 
@@ -85,42 +89,48 @@ if ! ${CC:-cc} ${CFLAGS:- -std=c11 -O2} -D_DEFAULT_SOURCE \
         -o "$BUILDDIR/pty_driver" ${LIBS:-} -lutil
 fi
 
+# A realistic corpus: this repo's own C sources and docs, tiled to size. Real
+# code has a varied line-length distribution, comments, indentation, and
+# identifiers — unlike the fixed-width uniform-random text that flatters a
+# width-wrapping pager. Nothing here is sparse or trivially compressible, and
+# /dev/zero is never used.
+corpus_seed() {
+    cat "$ROOT"/src/*.c "$ROOT"/src/*.h "$ROOT"/include/*.h "$ROOT"/README.md \
+        "$ROOT"/tests/pty_test.c 2>/dev/null
+}
+
 gen_text_fixture() {
     out=$1
     mb=$2
     bytes=$((mb * 1024 * 1024))
-    awk -v target="$bytes" '
-        BEGIN {
-            srand(1);
-            chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789     {}[],:.-_";
-            n = length(chars);
-            written = 0;
-            line = 1;
-            while (written < target) {
-                s = sprintf("%08d ", line);
-                for (i = 0; i < 112; i++)
-                    s = s substr(chars, int(rand() * n) + 1, 1);
-                print s;
-                written += length(s) + 1;
-                line++;
-            }
-            print "PAIGE_NEEDLE_LATE";
-        }' > "$out"
+    seedbytes=$(corpus_seed | wc -c)
+    [ "$seedbytes" -gt 0 ] || seedbytes=1
+    reps=$((bytes / seedbytes + 1))
+    : >"$out"
+    i=0
+    while [ "$i" -lt "$reps" ]; do
+        corpus_seed >>"$out"
+        i=$((i + 1))
+    done
+    printf 'PAIGE_NEEDLE_LATE\n' >>"$out"
 }
 
+# The huge-line stress: the same real bytes with newlines stripped, so it is one
+# enormous logical line (think minified JSON or a long log record), not random.
 gen_huge_fixture() {
     out=$1
     mb=$2
     bytes=$((mb * 1024 * 1024))
-    awk -v target="$bytes" '
-        BEGIN {
-            srand(2);
-            chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-            n = length(chars);
-            for (i = 0; i < target; i++)
-                printf "%s", substr(chars, int(rand() * n) + 1, 1);
-            printf "PAIGE_NEEDLE_LATE\n";
-        }' > "$out"
+    seedbytes=$(corpus_seed | tr -d '\n' | wc -c)
+    [ "$seedbytes" -gt 0 ] || seedbytes=1
+    reps=$((bytes / seedbytes + 1))
+    : >"$out"
+    i=0
+    while [ "$i" -lt "$reps" ]; do
+        corpus_seed | tr -d '\n' >>"$out"
+        i=$((i + 1))
+    done
+    printf '\n' >>"$out"
 }
 
 if [ ! -s "$FIXTURE" ]; then
@@ -130,10 +140,16 @@ if [ ! -s "$HUGE_FIXTURE" ]; then
     gen_huge_fixture "$HUGE_FIXTURE" "$SIZE_MB"
 fi
 
+# Make the demo print its stat counters on quit; the driver parses them. less,
+# ov, and moar ignore this env var (they report render/search/segments = -1).
+export PAIGE_STATS=1
+
 printf 'context tool=paige-bench smoke=%s runs=%s size_mb=%s fixture=%s huge_fixture=%s\n' \
     "$SMOKE" "$RUNS" "$SIZE_MB" "$FIXTURE" "$HUGE_FIXTURE"
 printf 'context uname=%s\n' "$(uname -a)"
 printf 'context rss_note=%s\n' "rss_max is getrusage(2) ru_maxrss; units vary by OS"
+printf 'context first_ms_note=%s\n' \
+    "first_ms is end-to-end TTFB incl. host slurp+index; render=/segments=/search_lines= isolate engine work"
 
 run_driver() {
     mode=$1
@@ -161,6 +177,23 @@ if command -v less >/dev/null 2>&1; then
     run_driver first less-huge -- less "$HUGE_FIXTURE"
 else
     printf 'bench mode=skip name=less status=missing\n'
+fi
+
+if command -v ov >/dev/null 2>&1; then
+    run_driver first ov -- ov "$FIXTURE"
+    run_driver jump ov -- ov "$FIXTURE"
+    run_driver search ov-late PAIGE_NEEDLE_LATE -- ov "$FIXTURE"
+    run_driver first ov-huge -- ov "$HUGE_FIXTURE"
+else
+    printf 'bench mode=skip name=ov status=missing\n'
+fi
+
+if command -v moar >/dev/null 2>&1; then
+    run_driver first moar -- moar "$FIXTURE"
+    run_driver jump moar -- moar "$FIXTURE"
+    run_driver first moar-huge -- moar "$HUGE_FIXTURE"
+else
+    printf 'bench mode=skip name=moar status=missing\n'
 fi
 
 if [ "$KEEP" -eq 0 ] && [ "$SMOKE" -eq 1 ]; then

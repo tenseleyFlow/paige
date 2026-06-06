@@ -51,6 +51,15 @@ static void write_key(int fd, const char *s)
     (void)!write(fd, s, strlen(s));
 }
 
+/* Pull "key=N" out of the demo's paige-stats line (or -1 if absent, e.g. for
+ * less/ov/moar). These counters isolate the engine's work from the host's
+ * file slurp+index, which the wall-clock first_ms below cannot. */
+static long parse_field(const char *s, const char *key)
+{
+    const char *p = strstr(s, key);
+    return p ? atol(p + strlen(key)) : -1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 5) {
@@ -106,11 +115,12 @@ int main(int argc, char **argv)
 
     for (;;) {
         double now = now_ms();
-        if (now - start > TIMEOUT_MS) {
+        if (now - start > (double)TIMEOUT_MS) {
             status = "timeout";
             break;
         }
-        if (action_sent && action_output && now - last_read >= IDLE_MS) {
+        if (action_sent && action_output &&
+            now - last_read >= (double)IDLE_MS) {
             elapsed_ms = last_read - action_start;
             done = 1;
             break;
@@ -158,6 +168,8 @@ int main(int argc, char **argv)
             action_output = 1;
     }
 
+    char tail[8192];
+    size_t tail_len = 0;
     write_key(master, "q");
     double drain_start = now_ms();
     while (now_ms() - drain_start < 1000.0) {
@@ -169,7 +181,18 @@ int main(int argc, char **argv)
             break;
         pty_bytes += (size_t)n;
         pty_reads++;
+        /* Keep the tail of the drained output so we can read the paige-stats
+         * line the demo prints on quit (with PAIGE_STATS set). */
+        size_t add = (size_t)n < sizeof tail - 1 ? (size_t)n : sizeof tail - 1;
+        if (tail_len + add > sizeof tail - 1) {
+            size_t drop = tail_len + add - (sizeof tail - 1);
+            memmove(tail, tail + drop, tail_len - drop);
+            tail_len -= drop;
+        }
+        memcpy(tail + tail_len, buf + ((size_t)n - add), add);
+        tail_len += add;
     }
+    tail[tail_len] = '\0';
 
     struct rusage ru;
     memset(&ru, 0, sizeof ru);
@@ -189,9 +212,12 @@ int main(int argc, char **argv)
 
     if (!done && strcmp(status, "ok") == 0)
         status = "no-output";
-    printf("bench mode=%s name=%s elapsed_ms=%.3f first_ms=%.3f "
-           "rss_max=%ld pty_bytes=%zu pty_reads=%zu status=%s\n",
-           mode, name, elapsed_ms, first_ms, ru.ru_maxrss, pty_bytes, pty_reads,
-           status);
+    printf(
+        "bench mode=%s name=%s elapsed_ms=%.3f first_ms=%.3f "
+        "rss_max=%ld pty_bytes=%zu pty_reads=%zu render=%ld search_lines=%ld "
+        "segments=%ld status=%s\n",
+        mode, name, elapsed_ms, first_ms, ru.ru_maxrss, pty_bytes, pty_reads,
+        parse_field(tail, "render="), parse_field(tail, "search_lines="),
+        parse_field(tail, "segments="), status);
     return strcmp(status, "ok") == 0 ? 0 : 1;
 }
