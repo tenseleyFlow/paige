@@ -1,42 +1,167 @@
 /*
  * paige-demo — a minimal standalone pager built on the paige engine.
  *
- * Reads a file (or stdin) into memory, indexes lines, and pages with simple
- * byte-based wrapping. It exists to exercise and demonstrate the library; real
- * clients (e.g. mat) supply their own width-aware render_line.
+ * Opens a file (mmap) or drains a stream (slurp), then pages it, building the
+ * newline-offset index ONLY as far as the viewport asks — so first paint is
+ * O(screen) regardless of file size, the same lazy contract real hosts (e.g.
+ * mat's linesrc) use. It exists to exercise and demonstrate the library.
+ *
+ * Because it mmaps regular files, a file truncated by another process while
+ * mapped would fault on the vanished pages; a SIGBUS handler with siglongjmp
+ * recovers (degrading to a short read) instead of crashing — see linesrc.c in
+ * the mat tree for the production version of this pattern.
  */
 #include "paige.h"
 
 #include <fcntl.h>
 #include <limits.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 struct doc {
-    char *data;
+    const char *data; /* logical bytes: mmap base or slurp buffer */
     size_t size;
-    size_t *line; /* byte offset of each logical line */
-    size_t nlines;
+    void *map;       /* mmap base to munmap, or NULL when slurped */
+    size_t map_size; /* length passed to munmap */
+    char *owned;     /* malloc'd slurp buffer to free, or NULL when mmap'd */
+    size_t *line;    /* byte offset of each logical line discovered so far */
+    size_t nlines;   /* offsets KNOWN so far (not the document total) */
+    size_t line_cap;
+    int eof_known; /* set once the index has reached EOF */
+    size_t total;  /* logical line count; valid only when eof_known */
+    int ends_nl;   /* whether the file ends with '\n' (valid when eof_known) */
+    char *rawbuf;  /* scratch for raw_line copies out of mmap */
+    size_t rawcap;
     const char *path;
     const char *title;
     char *hlbuf; /* reused highlight scratch, grown as needed */
     size_t hlcap;
 };
 
+/*
+ * SIGBUS recovery for mmap'd files truncated underneath us. The handler is a
+ * no-op unless armed; each function that reads mmap'd bytes arms a fresh
+ * sigsetjmp target right before its reads, so a fault unwinds locally and the
+ * read is reported as a short/empty result rather than killing the process.
+ */
+static _Thread_local sigjmp_buf sigbus_jmp;
+static _Thread_local volatile sig_atomic_t sigbus_armed;
+
+static void on_sigbus(int sig)
+{
+    (void)sig;
+    if (sigbus_armed)
+        siglongjmp(sigbus_jmp, 1);
+    _exit(128 + SIGBUS);
+}
+
+static void install_sigbus(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_sigbus;
+    sigaction(SIGBUS, &sa, NULL);
+}
+
+static void off_push(struct doc *d, size_t v)
+{
+    if (d->nlines == d->line_cap) {
+        size_t nc = d->line_cap ? d->line_cap * 2 : 256;
+        size_t *nb = realloc(d->line, nc * sizeof *nb);
+        if (!nb) { /* out of memory: stop indexing, treat here as EOF */
+            d->eof_known = 1;
+            d->total = d->nlines > 0 ? d->nlines - 1 : 0;
+            return;
+        }
+        d->line = nb;
+        d->line_cap = nc;
+    }
+    d->line[d->nlines++] = v;
+}
+
+/* Grow the offset table to include line `want` (or to EOF), scanning forward
+ * from the last known offset with memchr. The whole scan runs under one SIGBUS
+ * guard since it is the heaviest mmap read. */
+static void ensure(struct doc *d, size_t want)
+{
+    if (d->eof_known || d->nlines > want)
+        return;
+    if (d->map && sigsetjmp(sigbus_jmp, 1) != 0) {
+        d->eof_known = 1; /* truncated mid-scan: stop where we got to */
+        d->total = d->nlines > 0 ? d->nlines - 1 : 0;
+        return;
+    }
+    while (!d->eof_known && d->nlines <= want) {
+        size_t from = d->line[d->nlines - 1];
+        if (from >= d->size) {
+            d->eof_known = 1;
+            d->total = d->nlines - 1;
+            break;
+        }
+        const char *nl = memchr(d->data + from, '\n', d->size - from);
+        if (!nl) { /* final line has no trailing newline */
+            d->eof_known = 1;
+            d->total = d->nlines;
+            break;
+        }
+        size_t off = (size_t)(nl - d->data) + 1;
+        if (off < d->size) {
+            off_push(d, off);
+        } else { /* newline is the very last byte: that was the last line */
+            d->eof_known = 1;
+            d->total = d->nlines;
+            break;
+        }
+    }
+    if (d->eof_known)
+        d->ends_nl = (d->size > 0 && d->data[d->size - 1] == '\n');
+}
+
+/* Resolve the byte range of logical line L. Reads only the heap offset table
+ * and the ends_nl flag — never mmap content — so it needs no SIGBUS guard. */
 static int line_bounds(struct doc *d, size_t L, size_t *start, size_t *len)
 {
+    ensure(d, L + 1);
+    if (d->eof_known && L >= d->total)
+        return 0;
     if (L >= d->nlines)
         return 0;
     size_t s = d->line[L];
-    size_t e = (L + 1 < d->nlines) ? d->line[L + 1] : d->size;
-    if (e > s && d->data[e - 1] == '\n')
-        e--;
+    size_t e;
+    if (L + 1 < d->nlines) {
+        e = d->line[L + 1] - 1; /* the byte before line L+1 is the newline */
+    } else {
+        e = d->size; /* last known line runs to EOF */
+        if (d->ends_nl && e > s)
+            e--;
+    }
     *start = s;
-    *len = e - s;
+    *len = e > s ? e - s : 0;
     return 1;
+}
+
+/* Emit one logical line wrapped to `width`, reading mmap bytes under a SIGBUS
+ * guard. Returns the segment count, or -1 if the mapping faulted (truncated).
+ * The guard lives in its own function so no caller local is in its setjmp scope
+ * (gcc -Wclobbered). */
+static int emit_wrapped(struct doc *d, paige_sink *sink, size_t start,
+                        size_t len, int width)
+{
+    if (d->map && sigsetjmp(sigbus_jmp, 1) != 0)
+        return -1;
+    int segs = 0;
+    for (size_t i = 0; i < len; i += (size_t)width) {
+        size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
+        paige_emit(sink, d->data + start + i, chunk);
+        segs++;
+    }
+    return segs;
 }
 
 static int render_line(void *ctx, size_t L, int width, paige_sink *sink)
@@ -51,13 +176,8 @@ static int render_line(void *ctx, size_t L, int width, paige_sink *sink)
         paige_emit(sink, "", 0);
         return 1;
     }
-    int segs = 0;
-    for (size_t i = 0; i < len; i += (size_t)width) {
-        size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
-        paige_emit(sink, d->data + start + i, chunk);
-        segs++;
-    }
-    return segs;
+    int segs = emit_wrapped(d, sink, start, len, width);
+    return segs < 0 ? 0 : segs; /* faulted: truncate the frame, stay alive */
 }
 
 static int match_cmp(const void *a, const void *b)
@@ -151,31 +271,16 @@ static void emit_appended(struct doc *d, paige_sink *sink, const char *bytes,
     paige_emit(sink, d->hlbuf, len + 8);
 }
 
-static int render_line_ex(void *ctx, const paige_render_req *req,
-                          paige_sink *sink)
+/* Emit the requested segment window of one line, reading mmap bytes under a
+ * SIGBUS guard (isolated so no caller local is in its setjmp scope). Returns
+ * the line's total segment count, or -1 if the mapping faulted. */
+static int render_ex_emit(struct doc *d, paige_sink *sink,
+                          const paige_render_req *req, size_t start, size_t len,
+                          int width, const paige_match *matches,
+                          size_t nmatches)
 {
-    struct doc *d = ctx;
-    size_t start, len;
-    if (!line_bounds(d, req->lineno, &start, &len))
-        return 0;
-    int width = req->width;
-    if (width < 1)
-        width = 1;
-    /* req->seg_max == 0 means "count only, emit nothing"; otherwise emit just
-     * the requested window [seg_first, seg_first+seg_max). Total segment count
-     * is always returned so the pager can scroll. */
-    if (len == 0) {
-        if (req->seg_max != 0 && req->seg_first == 0)
-            paige_emit(sink, "", 0);
-        return 1;
-    }
-
-    paige_match matches[64];
-    size_t nmatches = req->nmatches < 64 ? req->nmatches : 64;
-    if (nmatches > 0) {
-        memcpy(matches, req->matches, nmatches * sizeof *matches);
-        qsort(matches, nmatches, sizeof *matches, match_cmp);
-    }
+    if (d->map && sigsetjmp(sigbus_jmp, 1) != 0)
+        return -1;
 
     if ((req->flags & PAIGE_RENDER_CHOP) != 0) {
         if (req->seg_max != 0) {
@@ -209,13 +314,70 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
     return (int)total;
 }
 
+static int render_line_ex(void *ctx, const paige_render_req *req,
+                          paige_sink *sink)
+{
+    struct doc *d = ctx;
+    size_t start, len;
+    if (!line_bounds(d, req->lineno, &start, &len))
+        return 0;
+    int width = req->width;
+    if (width < 1)
+        width = 1;
+    /* req->seg_max == 0 means "count only, emit nothing"; otherwise emit just
+     * the requested window [seg_first, seg_first+seg_max). Total segment count
+     * is always returned so the pager can scroll. */
+    if (len == 0) {
+        if (req->seg_max != 0 && req->seg_first == 0)
+            paige_emit(sink, "", 0);
+        return 1;
+    }
+
+    paige_match matches[64];
+    size_t nmatches = req->nmatches < 64 ? req->nmatches : 64;
+    if (nmatches > 0) {
+        memcpy(matches, req->matches, nmatches * sizeof *matches);
+        qsort(matches, nmatches, sizeof *matches, match_cmp);
+    }
+
+    int total =
+        render_ex_emit(d, sink, req, start, len, width, matches, nmatches);
+    return total < 0 ? 0 : total; /* faulted: truncate the frame, stay alive */
+}
+
+/* Copy a line's bytes out of (possibly mmap'd) storage under a SIGBUS guard.
+ * Returns 0 on success, -1 if the mapping faulted. */
+static int copy_guarded(struct doc *d, size_t start, size_t len)
+{
+    if (sigsetjmp(sigbus_jmp, 1) != 0)
+        return -1;
+    memcpy(d->rawbuf, d->data + start, len);
+    return 0;
+}
+
 static int raw_line(void *ctx, size_t L, paige_line *out)
 {
     struct doc *d = ctx;
     size_t start, len;
     if (!line_bounds(d, L, &start, &len))
         return 0;
-    out->bytes = d->data + start;
+    if (!d->map) { /* slurped: the heap buffer is stable, hand it back direct */
+        out->bytes = d->data + start;
+        out->len = len;
+        return 1;
+    }
+    /* mmap'd: copy out under a SIGBUS guard so callers (e.g. paige's search)
+     * never read a page that may vanish under them. */
+    if (d->rawcap < len) {
+        char *nb = realloc(d->rawbuf, len ? len : 1);
+        if (!nb)
+            return 0;
+        d->rawbuf = nb;
+        d->rawcap = len ? len : 1;
+    }
+    if (copy_guarded(d, start, len) != 0)
+        return 0;
+    out->bytes = d->rawbuf;
     out->len = len;
     return 1;
 }
@@ -223,19 +385,21 @@ static int raw_line(void *ctx, size_t L, paige_line *out)
 static int line_count(void *ctx, size_t *out)
 {
     struct doc *d = ctx;
-    *out = d->nlines;
+    ensure(d, (size_t)-1); /* lazy: scan to EOF only when % first asks */
+    *out = d->total;
     return 1;
 }
 
-/* Reference seek_end: hand the engine the last line index so `G` is O(screen)
- * without a line_count. This demo already holds a full index, so it is trivial;
- * a lazily-indexing host (e.g. mat) would seek/scan from EOF to find it. */
+/* Reference seek_end: name the last line so `G` is O(screen) without a
+ * line_count. This demo must index to EOF to learn the last index; a host that
+ * can seek by byte offset (or already tracks a lazy total) answers cheaper. */
 static int seek_end(void *ctx, size_t *out)
 {
     struct doc *d = ctx;
-    if (d->nlines == 0)
+    ensure(d, (size_t)-1);
+    if (d->total == 0)
         return 0;
-    *out = d->nlines - 1;
+    *out = d->total - 1;
     return 1;
 }
 
@@ -256,11 +420,17 @@ static int landmark(void *ctx, size_t from, int dir, size_t *out)
 {
     struct doc *d = ctx;
     if (dir > 0) {
-        for (size_t L = from + 1; L < d->nlines; L++)
+        /* Scan forward, letting line_bounds extend the index lazily, until a
+         * landmark is found or EOF (line_bounds returns 0). */
+        for (size_t L = from + 1;; L++) {
+            size_t s, len;
+            if (!line_bounds(d, L, &s, &len))
+                break;
             if (is_landmark(d, L)) {
                 *out = L;
                 return 1;
             }
+        }
     } else {
         for (size_t L = from; L-- > 0;)
             if (is_landmark(d, L)) {
@@ -271,51 +441,80 @@ static int landmark(void *ctx, size_t from, int dir, size_t *out)
     return 0;
 }
 
-static char *slurp(const char *path, size_t *out_size)
+static char *slurp_fd(int fd, size_t *out_size)
 {
-    int fd = path ? open(path, O_RDONLY) : STDIN_FILENO;
-    if (fd < 0)
-        return NULL;
     size_t cap = 1 << 16, len = 0;
     char *buf = malloc(cap);
+    if (!buf)
+        return NULL;
     for (;;) {
         if (len == cap) {
             cap *= 2;
-            buf = realloc(buf, cap);
+            char *nb = realloc(buf, cap);
+            if (!nb) {
+                free(buf);
+                return NULL;
+            }
+            buf = nb;
         }
         ssize_t r = read(fd, buf + len, cap - len);
         if (r < 0) {
             free(buf);
-            if (path)
-                close(fd);
             return NULL;
         }
         if (r == 0)
             break;
         len += (size_t)r;
     }
-    if (path)
-        close(fd);
     *out_size = len;
     return buf;
 }
 
-static void index_lines(struct doc *d)
+/* Open `path` (NULL = stdin): mmap regular files for O(screen) first paint,
+ * slurp pipes / non-seekable / mmap failures. Seeds the lazy index at line 0.
+ */
+static int open_doc(struct doc *d, const char *path)
 {
-    size_t cap = 256;
-    d->line = malloc(cap * sizeof *d->line);
-    d->nlines = 0;
-    d->line[d->nlines++] = 0;
-    for (size_t i = 0; i < d->size; i++) {
-        if (d->data[i] == '\n' && i + 1 <= d->size) {
-            if (d->nlines == cap) {
-                cap *= 2;
-                d->line = realloc(d->line, cap * sizeof *d->line);
-            }
-            if (i + 1 < d->size)
-                d->line[d->nlines++] = i + 1;
+    int fd = path ? open(path, O_RDONLY) : STDIN_FILENO;
+    if (fd < 0)
+        return 0;
+    struct stat st;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+        void *m = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (m != MAP_FAILED) {
+            d->map = m;
+            d->map_size = (size_t)st.st_size;
+            d->data = m;
+            d->size = (size_t)st.st_size;
+            sigbus_armed = 1; /* mmap is live for the rest of the run */
+            if (path)
+                close(fd); /* the mapping stays valid after close */
+            off_push(d, 0);
+            return 1;
         }
     }
+    /* pipe / stdin / non-seekable / empty / mmap failed: read it into memory */
+    size_t size = 0;
+    char *buf = slurp_fd(fd, &size);
+    if (path && fd >= 0)
+        close(fd);
+    if (!buf)
+        return 0;
+    d->owned = buf;
+    d->data = buf;
+    d->size = size;
+    off_push(d, 0);
+    return 1;
+}
+
+static void close_doc(struct doc *d)
+{
+    if (d->map)
+        munmap(d->map, d->map_size);
+    free(d->owned);
+    free(d->line);
+    free(d->rawbuf);
+    free(d->hlbuf);
 }
 
 static int refresh_doc(void *ctx)
@@ -329,30 +528,34 @@ static int refresh_doc(void *ctx)
     if ((size_t)st.st_size == d->size)
         return 0;
 
-    size_t size = 0;
-    char *data = slurp(d->path, &size);
-    if (!data)
+    /* Content grew/changed: drop the old mapping and re-open from scratch. */
+    struct doc nd;
+    memset(&nd, 0, sizeof nd);
+    nd.path = d->path;
+    nd.title = d->title;
+    if (!open_doc(&nd, d->path))
         return 0;
-    free(d->data);
+    if (d->map)
+        munmap(d->map, d->map_size);
+    free(d->owned);
     free(d->line);
-    d->data = data;
-    d->size = size;
-    d->line = NULL;
-    d->nlines = 0;
-    index_lines(d);
+    /* keep rawbuf/hlbuf scratch across refreshes */
+    nd.rawbuf = d->rawbuf;
+    nd.rawcap = d->rawcap;
+    nd.hlbuf = d->hlbuf;
+    nd.hlcap = d->hlcap;
+    *d = nd;
     return 1;
 }
 
-/* Slurp + index `path` (NULL = stdin) and fill a paige_doc for it. */
+/* Open `path` (NULL = stdin) and fill a paige_doc for it. */
 static int fill_doc(struct doc *d, paige_doc *pd, const char *path)
 {
     memset(d, 0, sizeof *d);
-    d->data = slurp(path, &d->size);
-    if (!d->data)
-        return 0;
-    d->title = path ? path : "stdin";
     d->path = path;
-    index_lines(d);
+    d->title = path ? path : "stdin";
+    if (!open_doc(d, path))
+        return 0;
     *pd = (paige_doc){.ctx = d,
                       .render_line = render_line,
                       .title = d->title,
@@ -371,6 +574,15 @@ static int fill_doc(struct doc *d, paige_doc *pd, const char *path)
     return 1;
 }
 
+/* Write the whole document to stdout under a SIGBUS guard (the no-terminal
+ * fallback). Isolated so main's locals are not in the setjmp scope. */
+static void dump_plain(struct doc *d)
+{
+    if (d->map && sigsetjmp(sigbus_jmp, 1) != 0)
+        return;
+    (void)!write(STDOUT_FILENO, d->data, d->size);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 &&
@@ -384,6 +596,8 @@ int main(int argc, char **argv)
                 "usage: paige-demo FILE... (or pipe content on stdin)\n");
         return 2;
     }
+
+    install_sigbus();
 
     size_t ndocs = argc > 1 ? (size_t)(argc - 1) : 1; /* stdin counts as 1 */
     struct doc *d = calloc(ndocs, sizeof *d);
@@ -417,24 +631,21 @@ int main(int argc, char **argv)
         opts.follow_poll_ms = atoi(fms);
     if (paige_run_many(docs, ndocs, &opts) < 0) {
         /* No terminal: dump the first document plainly. */
-        (void)!write(STDOUT_FILENO, d[0].data, d[0].size);
+        dump_plain(&d[0]);
     }
     if (show_stats) {
         fprintf(
             stderr,
             "paige-stats: render=%llu frames=%llu rows=%llu bytes=%llu "
             "writes=%llu search_lines=%llu hscroll=%llu follow_refreshes=%llu "
-            "follow_updates=%llu segments=%llu\n",
+            "follow_updates=%llu segments=%llu host_indexed=%zu\n",
             stats.render_calls, stats.frames, stats.rows_drawn,
             stats.bytes_emitted, stats.writes, stats.search_lines,
             stats.hscroll_moves, stats.follow_refreshes, stats.follow_updates,
-            stats.segments_emitted);
+            stats.segments_emitted, d[0].nlines);
     }
-    for (size_t i = 0; i < ndocs; i++) {
-        free(d[i].data);
-        free(d[i].line);
-        free(d[i].hlbuf);
-    }
+    for (size_t i = 0; i < ndocs; i++)
+        close_doc(&d[i]);
     free(d);
     free(docs);
     return 0;
