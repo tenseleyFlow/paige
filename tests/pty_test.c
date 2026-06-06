@@ -34,6 +34,33 @@ static void on_alarm(int sig)
     _exit(2);
 }
 
+static pid_t spawn_demo(int *master, const struct winsize *ws, const char *path)
+{
+    pid_t pid = forkpty(master, NULL, NULL, ws);
+    if (pid < 0) {
+        perror("forkpty");
+        return -1;
+    }
+    if (pid == 0) {
+        execl("./paige-demo", "paige-demo", path, (char *)NULL);
+        _exit(127);
+    }
+    return pid;
+}
+
+static void finish_demo(int master, pid_t pid, char *buf, size_t cap,
+                        int *status)
+{
+    if (waitpid(pid, status, WNOHANG) == 0) {
+        pty_drain(master, buf, cap, 300);
+        if (waitpid(pid, status, WNOHANG) == 0) {
+            kill(pid, SIGTERM);
+            waitpid(pid, status, 0);
+        }
+    }
+    close(master);
+}
+
 int main(void)
 {
     signal(SIGALRM, on_alarm);
@@ -64,15 +91,10 @@ int main(void)
     ws.ws_col = 40;
 
     int master;
-    pid_t pid = forkpty(&master, NULL, NULL, &ws);
+    pid_t pid = spawn_demo(&master, &ws, tmpl);
     if (pid < 0) {
-        perror("forkpty");
         unlink(tmpl);
         return 1;
-    }
-    if (pid == 0) {
-        execl("./paige-demo", "paige-demo", tmpl, (char *)NULL);
-        _exit(127);
     }
 
     char buf[1 << 16];
@@ -85,6 +107,14 @@ int main(void)
     }
     if (pty_has(buf, "line020")) {
         printf("FAIL: showed more than a screenful\n");
+        fails++;
+    }
+
+    pty_send_text(master, "''"); /* no previous position yet */
+    pty_read_screen(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "no previous position")) {
+        printf("FAIL: previous-position mark should report no prior jump\n");
+        pty_dump_visible(buf);
         fails++;
     }
 
@@ -296,26 +326,13 @@ int main(void)
         fails++;
     }
     int status;
-    if (waitpid(pid, &status, WNOHANG) == 0) {
-        /* still alive: give it a moment, then force it down (backstop) */
-        pty_drain(master, buf, sizeof buf, 300);
-        if (waitpid(pid, &status, WNOHANG) == 0) {
-            kill(pid, SIGTERM);
-            waitpid(pid, &status, 0);
-        }
-    }
-    close(master);
+    finish_demo(master, pid, buf, sizeof buf, &status);
 
     setenv("PAIGE_NO_RAW", "1", 1);
-    pid = forkpty(&master, NULL, NULL, &ws);
+    pid = spawn_demo(&master, &ws, tmpl);
     if (pid < 0) {
-        perror("forkpty");
         unlink(tmpl);
         return 1;
-    }
-    if (pid == 0) {
-        execl("./paige-demo", "paige-demo", tmpl, (char *)NULL);
-        _exit(127);
     }
     pty_read_screen(master, buf, sizeof buf, 300);
     pty_send_text(master, "/line050\n");
@@ -326,26 +343,14 @@ int main(void)
     }
     pty_send_text(master, "q");
     pty_drain(master, buf, sizeof buf, 300);
-    if (waitpid(pid, &status, WNOHANG) == 0) {
-        pty_drain(master, buf, sizeof buf, 300);
-        if (waitpid(pid, &status, WNOHANG) == 0) {
-            kill(pid, SIGTERM);
-            waitpid(pid, &status, 0);
-        }
-    }
-    close(master);
+    finish_demo(master, pid, buf, sizeof buf, &status);
 
     unsetenv("PAIGE_NO_RAW");
     setenv("PAIGE_NO_COUNT", "1", 1);
-    pid = forkpty(&master, NULL, NULL, &ws);
+    pid = spawn_demo(&master, &ws, tmpl);
     if (pid < 0) {
-        perror("forkpty");
         unlink(tmpl);
         return 1;
-    }
-    if (pid == 0) {
-        execl("./paige-demo", "paige-demo", tmpl, (char *)NULL);
-        _exit(127);
     }
     pty_read_screen(master, buf, sizeof buf, 300);
     pty_send_text(master, "50%");
@@ -357,14 +362,7 @@ int main(void)
     }
     pty_send_text(master, "q");
     pty_drain(master, buf, sizeof buf, 300);
-    if (waitpid(pid, &status, WNOHANG) == 0) {
-        pty_drain(master, buf, sizeof buf, 300);
-        if (waitpid(pid, &status, WNOHANG) == 0) {
-            kill(pid, SIGTERM);
-            waitpid(pid, &status, 0);
-        }
-    }
-    close(master);
+    finish_demo(master, pid, buf, sizeof buf, &status);
 
     unsetenv("PAIGE_NO_COUNT");
     char follow_tmpl[] = "/tmp/paige_follow_XXXXXX";
@@ -382,16 +380,11 @@ int main(void)
     (void)!write(ffd, "partial", 7);
     close(ffd);
 
-    pid = forkpty(&master, NULL, NULL, &ws);
+    pid = spawn_demo(&master, &ws, follow_tmpl);
     if (pid < 0) {
-        perror("forkpty");
         unlink(tmpl);
         unlink(follow_tmpl);
         return 1;
-    }
-    if (pid == 0) {
-        execl("./paige-demo", "paige-demo", follow_tmpl, (char *)NULL);
-        _exit(127);
     }
     pty_read_screen(master, buf, sizeof buf, 300);
     pty_send_text(master, "F");
@@ -437,14 +430,7 @@ int main(void)
     }
     pty_send_text(master, "q");
     pty_drain(master, buf, sizeof buf, 300);
-    if (waitpid(pid, &status, WNOHANG) == 0) {
-        pty_drain(master, buf, sizeof buf, 300);
-        if (waitpid(pid, &status, WNOHANG) == 0) {
-            kill(pid, SIGTERM);
-            waitpid(pid, &status, 0);
-        }
-    }
-    close(master);
+    finish_demo(master, pid, buf, sizeof buf, &status);
 
     setenv("PAIGE_CHOP", "1", 1);
     char chop_tmpl[] = "/tmp/paige_chop_XXXXXX";
@@ -463,16 +449,11 @@ int main(void)
     (void)!write(cfd, tail, strlen(tail));
     close(cfd);
 
-    pid = forkpty(&master, NULL, NULL, &ws);
+    pid = spawn_demo(&master, &ws, chop_tmpl);
     if (pid < 0) {
-        perror("forkpty");
         unlink(tmpl);
         unlink(chop_tmpl);
         return 1;
-    }
-    if (pid == 0) {
-        execl("./paige-demo", "paige-demo", chop_tmpl, (char *)NULL);
-        _exit(127);
     }
     pty_read_screen(master, buf, sizeof buf, 300);
     if (!pty_has(buf, "second-line") || !pty_has(buf, ">")) {
@@ -499,14 +480,7 @@ int main(void)
     }
     pty_send_text(master, "q");
     pty_drain(master, buf, sizeof buf, 300);
-    if (waitpid(pid, &status, WNOHANG) == 0) {
-        pty_drain(master, buf, sizeof buf, 300);
-        if (waitpid(pid, &status, WNOHANG) == 0) {
-            kill(pid, SIGTERM);
-            waitpid(pid, &status, 0);
-        }
-    }
-    close(master);
+    finish_demo(master, pid, buf, sizeof buf, &status);
     unlink(tmpl);
     unlink(follow_tmpl);
     unlink(chop_tmpl);
