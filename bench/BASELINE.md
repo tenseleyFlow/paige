@@ -70,3 +70,38 @@ noise-free (unlike wall-clock) and a breach means an algorithmic regression: the
 huge-wrap bound (`render ≤ 8`) is what would have caught the O(line) wrap bug.
 `first_ms`, `rss_max`, and `search_lines` are **not** gated — they vary with host
 indexing policy, OS, and corpus size. Re-record with `sh bench/check.sh --show`.
+
+## Parity finding: mat-as-host vs less (the engine is already at parity)
+
+The `first_ms` gap above (paige-demo ~130–180 ms vs less ~5 ms on 64 MiB) is the
+**demo host's** eager `slurp()` + full `index_lines()` prologue, not the engine.
+To prove that, the bench now drives **mat** — the production host, which indexes
+lazily (mmap + on-demand newline index) — as a subject (`mat --paging=always
+--decorations=never --color=never`, full runs only; excluded from `--smoke`).
+
+Measured on the 64 MiB real-source corpus (this FreeBSD box):
+
+| subject | first paint | jump-to-bottom (`G`) | why |
+|---|---|---|---|
+| paige-demo | ~130–180 ms | ~0.06 ms | eager slurp+index up front; has `line_count` so `G` is O(screen) |
+| **mat** (lazy host) | **~21–37 ms** | **~1190 ms** | O(screen) first paint; **no `line_count` → `G` forward-scans to EOF, O(file)** |
+| less | ~5–52 ms | ~43 ms | mmap + lazy line-position cache; seeks to EOF for `G` |
+
+Two conclusions:
+
+1. **First paint is already at parity.** mat (~21–37 ms) sits with less (~5–52 ms);
+   the demo's ~130–180 ms is purely its eager prologue. The engine renders a
+   screenful regardless of file size — confirmed by the gated counters above.
+2. **One real engine gap remains, and it is navigation, not first paint.** A host
+   with no `line_count` (mat) takes the "unknown length" branch of `goto_bottom()`
+   and forward-scans to EOF on `G` — ~1.19 s on 64 MiB vs less's ~43 ms. The demo
+   avoids it only because it supplies `line_count`. This motivates the optional
+   `seek_end` hook so a seekable host can reach the bottom in O(screen).
+
+Note: the pty bench driver's jump/search timing was fixed alongside this — it used
+to send the keypress on the first output byte, mistaking the initial frame's tail
+for the response and reporting a slow `G` as ~0 ms (mat read "0.04 ms" before the
+fix). It now waits for the initial frame to settle, then times the response, so a
+stalled redraw is measured honestly. Driving mat through the minimal bench pty can
+stall briefly on mat's startup terminal probe; the driver's 15 s timeout caps it,
+which is why mat is a full-run-only subject and never part of the gate.

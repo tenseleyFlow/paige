@@ -105,7 +105,7 @@ int main(int argc, char **argv)
         _exit(127);
     }
 
-    enum { TIMEOUT_MS = 15000, IDLE_MS = 120 };
+    enum { TIMEOUT_MS = 15000, IDLE_MS = 120, SETTLE_MS = 120 };
     char buf[8192];
     size_t pty_bytes = 0, pty_reads = 0;
     double first_ms = -1.0, elapsed_ms = -1.0;
@@ -124,6 +124,26 @@ int main(int argc, char **argv)
             elapsed_ms = last_read - action_start;
             done = 1;
             break;
+        }
+        /* Send the action only once the INITIAL frame has settled. Sending it
+         * on the first byte (as we used to) let the initial frame's tail be
+         * mistaken for the response, so a host that then stalls -- e.g. an
+         * O(file) jump-to-end that goes silent for a second before redrawing --
+         * was concluded during the stall and reported ~0ms. We now wait out the
+         * initial frame, then time from the keypress to the response settling.
+         */
+        if (!action_sent && first_ms >= 0.0 && strcmp(mode, "first") != 0 &&
+            now - last_read >= (double)SETTLE_MS) {
+            if (strcmp(mode, "jump") == 0) {
+                action_start = now_ms();
+                write_key(master, "G");
+            } else {
+                char query[512];
+                snprintf(query, sizeof query, "/%s\n", needle ? needle : "");
+                action_start = now_ms();
+                write_key(master, query);
+            }
+            action_sent = 1;
         }
 
         struct pollfd pfd = {master, POLLIN, 0};
@@ -151,18 +171,7 @@ int main(int argc, char **argv)
                 done = 1;
                 break;
             }
-            if (strcmp(mode, "jump") == 0) {
-                action_start = now_ms();
-                write_key(master, "G");
-                action_sent = 1;
-            } else {
-                char query[512];
-                snprintf(query, sizeof query, "/%s\n", needle ? needle : "");
-                action_start = now_ms();
-                write_key(master, query);
-                action_sent = 1;
-            }
-            continue;
+            continue; /* action is sent later, once the initial frame settles */
         }
         if (action_sent)
             action_output = 1;
