@@ -146,6 +146,24 @@ static int line_bounds(struct doc *d, size_t L, size_t *start, size_t *len)
     return 1;
 }
 
+/* Emit one logical line wrapped to `width`, reading mmap bytes under a SIGBUS
+ * guard. Returns the segment count, or -1 if the mapping faulted (truncated).
+ * The guard lives in its own function so no caller local is in its setjmp scope
+ * (gcc -Wclobbered). */
+static int emit_wrapped(struct doc *d, paige_sink *sink, size_t start,
+                        size_t len, int width)
+{
+    if (d->map && sigsetjmp(sigbus_jmp, 1) != 0)
+        return -1;
+    int segs = 0;
+    for (size_t i = 0; i < len; i += (size_t)width) {
+        size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
+        paige_emit(sink, d->data + start + i, chunk);
+        segs++;
+    }
+    return segs;
+}
+
 static int render_line(void *ctx, size_t L, int width, paige_sink *sink)
 {
     struct doc *d = ctx;
@@ -158,17 +176,8 @@ static int render_line(void *ctx, size_t L, int width, paige_sink *sink)
         paige_emit(sink, "", 0);
         return 1;
     }
-    /* Emitting reads mmap bytes: arm a local recovery point. On a fault we stop
-     * early (the frame is truncated, the terminal stays intact). */
-    if (d->map && sigsetjmp(sigbus_jmp, 1) != 0)
-        return 0;
-    int segs = 0;
-    for (size_t i = 0; i < len; i += (size_t)width) {
-        size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
-        paige_emit(sink, d->data + start + i, chunk);
-        segs++;
-    }
-    return segs;
+    int segs = emit_wrapped(d, sink, start, len, width);
+    return segs < 0 ? 0 : segs; /* faulted: truncate the frame, stay alive */
 }
 
 static int match_cmp(const void *a, const void *b)
@@ -262,35 +271,16 @@ static void emit_appended(struct doc *d, paige_sink *sink, const char *bytes,
     paige_emit(sink, d->hlbuf, len + 8);
 }
 
-static int render_line_ex(void *ctx, const paige_render_req *req,
-                          paige_sink *sink)
+/* Emit the requested segment window of one line, reading mmap bytes under a
+ * SIGBUS guard (isolated so no caller local is in its setjmp scope). Returns
+ * the line's total segment count, or -1 if the mapping faulted. */
+static int render_ex_emit(struct doc *d, paige_sink *sink,
+                          const paige_render_req *req, size_t start, size_t len,
+                          int width, const paige_match *matches,
+                          size_t nmatches)
 {
-    struct doc *d = ctx;
-    size_t start, len;
-    if (!line_bounds(d, req->lineno, &start, &len))
-        return 0;
-    int width = req->width;
-    if (width < 1)
-        width = 1;
-    /* req->seg_max == 0 means "count only, emit nothing"; otherwise emit just
-     * the requested window [seg_first, seg_first+seg_max). Total segment count
-     * is always returned so the pager can scroll. */
-    if (len == 0) {
-        if (req->seg_max != 0 && req->seg_first == 0)
-            paige_emit(sink, "", 0);
-        return 1;
-    }
-
-    paige_match matches[64];
-    size_t nmatches = req->nmatches < 64 ? req->nmatches : 64;
-    if (nmatches > 0) {
-        memcpy(matches, req->matches, nmatches * sizeof *matches);
-        qsort(matches, nmatches, sizeof *matches, match_cmp);
-    }
-
-    /* The emit paths below read mmap'd bytes: arm a recovery point first. */
     if (d->map && sigsetjmp(sigbus_jmp, 1) != 0)
-        return 0;
+        return -1;
 
     if ((req->flags & PAIGE_RENDER_CHOP) != 0) {
         if (req->seg_max != 0) {
@@ -324,6 +314,47 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
     return (int)total;
 }
 
+static int render_line_ex(void *ctx, const paige_render_req *req,
+                          paige_sink *sink)
+{
+    struct doc *d = ctx;
+    size_t start, len;
+    if (!line_bounds(d, req->lineno, &start, &len))
+        return 0;
+    int width = req->width;
+    if (width < 1)
+        width = 1;
+    /* req->seg_max == 0 means "count only, emit nothing"; otherwise emit just
+     * the requested window [seg_first, seg_first+seg_max). Total segment count
+     * is always returned so the pager can scroll. */
+    if (len == 0) {
+        if (req->seg_max != 0 && req->seg_first == 0)
+            paige_emit(sink, "", 0);
+        return 1;
+    }
+
+    paige_match matches[64];
+    size_t nmatches = req->nmatches < 64 ? req->nmatches : 64;
+    if (nmatches > 0) {
+        memcpy(matches, req->matches, nmatches * sizeof *matches);
+        qsort(matches, nmatches, sizeof *matches, match_cmp);
+    }
+
+    int total =
+        render_ex_emit(d, sink, req, start, len, width, matches, nmatches);
+    return total < 0 ? 0 : total; /* faulted: truncate the frame, stay alive */
+}
+
+/* Copy a line's bytes out of (possibly mmap'd) storage under a SIGBUS guard.
+ * Returns 0 on success, -1 if the mapping faulted. */
+static int copy_guarded(struct doc *d, size_t start, size_t len)
+{
+    if (sigsetjmp(sigbus_jmp, 1) != 0)
+        return -1;
+    memcpy(d->rawbuf, d->data + start, len);
+    return 0;
+}
+
 static int raw_line(void *ctx, size_t L, paige_line *out)
 {
     struct doc *d = ctx;
@@ -344,9 +375,8 @@ static int raw_line(void *ctx, size_t L, paige_line *out)
         d->rawbuf = nb;
         d->rawcap = len ? len : 1;
     }
-    if (sigsetjmp(sigbus_jmp, 1) != 0)
+    if (copy_guarded(d, start, len) != 0)
         return 0;
-    memcpy(d->rawbuf, d->data + start, len);
     out->bytes = d->rawbuf;
     out->len = len;
     return 1;
@@ -544,6 +574,15 @@ static int fill_doc(struct doc *d, paige_doc *pd, const char *path)
     return 1;
 }
 
+/* Write the whole document to stdout under a SIGBUS guard (the no-terminal
+ * fallback). Isolated so main's locals are not in the setjmp scope. */
+static void dump_plain(struct doc *d)
+{
+    if (d->map && sigsetjmp(sigbus_jmp, 1) != 0)
+        return;
+    (void)!write(STDOUT_FILENO, d->data, d->size);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 &&
@@ -591,9 +630,8 @@ int main(int argc, char **argv)
     if (fms)
         opts.follow_poll_ms = atoi(fms);
     if (paige_run_many(docs, ndocs, &opts) < 0) {
-        /* No terminal: dump the first document plainly (guarded for mmap). */
-        if (!(d[0].map && sigsetjmp(sigbus_jmp, 1) != 0))
-            (void)!write(STDOUT_FILENO, d[0].data, d[0].size);
+        /* No terminal: dump the first document plainly. */
+        dump_plain(&d[0]);
     }
     if (show_stats) {
         fprintf(
