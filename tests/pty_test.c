@@ -353,6 +353,46 @@ int main(void)
     int status;
     finish_demo(master, pid, buf, sizeof buf, &status);
 
+    /* Ctrl-C is delivered as a byte (ISIG is cleared) and quits cleanly,
+     * restoring the terminal (leaving the alternate screen). */
+    pid = spawn_demo(&master, &ws, tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "line001", WAIT_MS);
+    pty_send(master, "\x03", 1); /* Ctrl-C */
+    pty_drain(master, buf, sizeof buf, 300);
+    if (!pty_has(buf, "\x1b[?1049l")) {
+        printf("FAIL: Ctrl-C did not restore the terminal\n");
+        fails++;
+    }
+    finish_demo(master, pid, buf, sizeof buf, &status);
+    if (!WIFEXITED(status)) {
+        printf("FAIL: Ctrl-C did not exit cleanly\n");
+        fails++;
+    }
+
+    /* An external SIGTERM must also restore the terminal before dying. */
+    pid = spawn_demo(&master, &ws, tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "line001", WAIT_MS);
+    kill(pid, SIGTERM);
+    pty_drain(master, buf, sizeof buf, 500);
+    if (!pty_has(buf, "\x1b[?1049l")) {
+        printf("FAIL: SIGTERM did not restore the terminal\n");
+        fails++;
+    }
+    waitpid(pid, &status, 0);
+    close(master);
+    if (!(WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM)) {
+        printf("FAIL: process did not terminate via SIGTERM\n");
+        fails++;
+    }
+
     setenv("PAIGE_NO_RAW", "1", 1);
     pid = spawn_demo(&master, &ws, tmpl);
     if (pid < 0) {

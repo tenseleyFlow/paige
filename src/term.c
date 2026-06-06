@@ -18,6 +18,25 @@ static void on_winch(int sig)
     paige_resized = 1;
 }
 
+/* The active terminal, for the fatal-signal restore path. */
+static struct paige_term *g_active = NULL;
+
+/*
+ * Put the terminal back if a fatal signal kills us mid-page. Without this an
+ * external SIGTERM/SIGHUP (or any signal whose default action terminates the
+ * process) leaves the user on the alternate screen with the cursor hidden and
+ * raw mode set. Installed with SA_RESETHAND, so once we have restored we
+ * re-raise to die with the signal's normal disposition and exit status.
+ */
+static void on_fatal(int sig)
+{
+    if (g_active) {
+        paige_term_leave(g_active);
+        g_active = NULL;
+    }
+    raise(sig);
+}
+
 static void write_all(int fd, const char *s)
 {
     size_t n = strlen(s);
@@ -66,7 +85,12 @@ void paige_term_enter(struct paige_term *t)
 {
     if (tcgetattr(t->tty_fd, &t->orig) == 0) {
         struct termios raw = t->orig;
-        raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
+        /* Clear ISIG so Ctrl-C/Ctrl-\ reach us as bytes (the pager quits on
+         * them via the key loop and restores the terminal) instead of killing
+         * the process with the terminal still in raw/alt mode; clear IXON so
+         * Ctrl-S can't silently freeze pager output. */
+        raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ISIG);
+        raw.c_iflag &= (tcflag_t)~IXON;
         raw.c_cc[VMIN] = 1;
         raw.c_cc[VTIME] = 0;
         if (tcsetattr(t->tty_fd, TCSAFLUSH, &raw) == 0)
@@ -78,6 +102,19 @@ void paige_term_enter(struct paige_term *t)
     sa.sa_handler =
         on_winch; /* no SA_RESTART: read() returns EINTR on resize */
     sigaction(SIGWINCH, &sa, NULL);
+
+    /* Restore the terminal if we are killed by a signal whose default action
+     * terminates us (an external SIGTERM/SIGHUP, or SIGINT/SIGQUIT delivered
+     * from outside the tty). */
+    struct sigaction fa;
+    memset(&fa, 0, sizeof fa);
+    fa.sa_handler = on_fatal;
+    fa.sa_flags = SA_RESETHAND; /* fire once, then default disposition */
+    sigaction(SIGINT, &fa, NULL);
+    sigaction(SIGTERM, &fa, NULL);
+    sigaction(SIGQUIT, &fa, NULL);
+    sigaction(SIGHUP, &fa, NULL);
+    g_active = t;
 
     write_all(t->out_fd, "\x1b[?1049h" /* alt screen */
                          "\x1b[?25l" /* hide cursor */);
@@ -95,6 +132,7 @@ void paige_term_leave(struct paige_term *t)
         tcsetattr(t->tty_fd, TCSAFLUSH, &t->orig);
         t->raw = false;
     }
+    g_active = NULL;
 }
 
 /* Read one byte from the tty, or -1 on EINTR/EOF. */
