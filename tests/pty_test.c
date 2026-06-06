@@ -616,6 +616,29 @@ int main(void)
         fails++;
     }
     finish_demo(master, pid, buf, sizeof buf, &status);
+
+    /* A long unbounded search (committed with Enter) can be cancelled by a
+     * keypress: send the pattern, Enter, and one extra byte in a single write.
+     * The byte sits buffered; when the scan reaches its interrupt checkpoint it
+     * finds it, consumes it, and reports "search interrupted". */
+    pid = spawn_demo(&master, &ws, big_tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        unlink(big_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "L000001", WAIT_MS);
+    pty_send_text(master, "/zzzzzzzz\nx");
+    pty_wait_for(master, buf, sizeof buf, "search interrupted", WAIT_MS);
+    if (!pty_has(buf, "search interrupted")) {
+        printf("FAIL: a long search was not cancelled by a keypress\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "q");
+    finish_demo(master, pid, buf, sizeof buf, &status);
     unlink(big_tmpl);
 
     unlink(tmpl);

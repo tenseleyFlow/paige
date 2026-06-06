@@ -2,6 +2,7 @@
 #include "search.h"
 #include "term.h"
 
+#include <poll.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -146,6 +147,9 @@ enum {
      * walking the whole file (and wrapping) on every character. Enter runs the
      * authoritative unbounded search. */
     SEARCH_PREVIEW_MAX = 10000,
+    /* On an unbounded search, peek for a cancelling keypress this often (must
+     * be a power of two for the bit-mask check). */
+    SEARCH_INTERRUPT_CHUNK = 1 << 16,
 };
 
 /* Sentinel max_scan: search the whole document (no per-keystroke bound). */
@@ -175,6 +179,7 @@ struct search_state {
     size_t active_L;
     size_t active_off;
     size_t active_len;
+    bool interrupted; /* last scan was cancelled by a keypress */
     char message[SEARCH_STATUS_MAX];
 };
 
@@ -192,6 +197,7 @@ struct mark {
 struct view {
     const paige_doc *doc;
     struct seglist *sl;
+    int tty_fd; /* for cancelling a long search; <=0 disables */
     int width;
     bool chop;
     size_t hscroll;
@@ -292,6 +298,34 @@ static bool raw_line(const paige_doc *doc, size_t L, paige_line *line)
     return doc->raw_line(doc->ctx, L, line) != 0;
 }
 
+/* Non-blocking peek at the tty: if a key is waiting, consume it and report that
+ * the user wants to cancel the in-progress scan. */
+static bool search_interrupted(struct view *v)
+{
+    if (v->tty_fd <= 0)
+        return false;
+    struct pollfd pfd = {v->tty_fd, POLLIN, 0};
+    if (poll(&pfd, 1, 0) <= 0)
+        return false;
+    unsigned char c;
+    return read(v->tty_fd, &c, 1) > 0;
+}
+
+/* Per-line bookkeeping for the document scans: stop when the bounded preview
+ * window is exhausted, or — on a long unbounded scan — when a keypress cancels
+ * it (only checked every SEARCH_INTERRUPT_CHUNK lines, so it is ~free). */
+static bool scan_should_stop(struct view *v, size_t *scanned, size_t max_scan)
+{
+    if (++*scanned >= max_scan)
+        return true;
+    if ((*scanned & (SEARCH_INTERRUPT_CHUNK - 1)) == 0 &&
+        search_interrupted(v)) {
+        v->search->interrupted = true;
+        return true;
+    }
+    return false;
+}
+
 static bool search_forward_doc(struct view *v, const char *pattern,
                                size_t pattern_len, size_t start_L,
                                size_t start_off, struct search_hit *hit,
@@ -312,8 +346,8 @@ static bool search_forward_doc(struct view *v, const char *pattern,
             *hit = (struct search_hit){L, off, pattern_len, false};
             return true;
         }
-        if (++scanned >= max_scan)
-            return false; /* bounded preview: stop without wrapping */
+        if (scan_should_stop(v, &scanned, max_scan))
+            return false; /* preview window exhausted, or user cancelled */
     }
     for (size_t L = 0; raw_line(v->doc, L, &line); L++) {
         if (v->stats)
@@ -323,7 +357,7 @@ static bool search_forward_doc(struct view *v, const char *pattern,
             *hit = (struct search_hit){L, off, pattern_len, true};
             return true;
         }
-        if (++scanned >= max_scan)
+        if (scan_should_stop(v, &scanned, max_scan))
             return false;
     }
     return false;
@@ -363,8 +397,8 @@ static bool search_backward_doc(struct view *v, const char *pattern,
                 *hit = (struct search_hit){i, off, pattern_len, false};
                 return true;
             }
-            if (++scanned >= max_scan)
-                return false; /* bounded preview: stop without wrapping */
+            if (scan_should_stop(v, &scanned, max_scan))
+                return false; /* preview window exhausted, or user cancelled */
         }
         if (i == 0)
             break;
@@ -383,7 +417,7 @@ static bool search_backward_doc(struct view *v, const char *pattern,
                 *hit = (struct search_hit){i, off, pattern_len, true};
                 return true;
             }
-            if (++scanned >= max_scan)
+            if (scan_should_stop(v, &scanned, max_scan))
                 return false;
         }
         if (i == 0)
@@ -440,9 +474,16 @@ static bool search_run_from(struct view *v, int dir, size_t start_L,
                             size_t boundary, size_t max_scan)
 {
     struct search_hit hit;
+    v->search->interrupted = false;
     if (search_doc(v, dir, start_L, boundary, &hit, max_scan)) {
         search_activate(v, &hit);
         return true;
+    }
+    if (v->search->interrupted) {
+        v->search->active = false;
+        snprintf(v->search->message, sizeof v->search->message,
+                 "search interrupted");
+        return false;
     }
     search_not_found(v);
     return false;
@@ -1187,6 +1228,7 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
     struct search_state search = {0};
     struct view v = {.doc = doc,
                      .sl = &sl,
+                     .tty_fd = t.tty_fd,
                      .width = t.cols,
                      .chop =
                          opts && opts->chop_long_lines && doc->render_line_ex,
