@@ -79,8 +79,9 @@ typedef struct paige_doc {
     /*
      * Emit the visual segments of logical line `lineno`, laid out for a content
      * area of `width` columns, by calling paige_emit() once per segment in top
-     * to bottom order. Return the number of segments emitted (>= 1), or 0 to
-     * signal that `lineno` is at or past the end of the document.
+     * to bottom order. Return the number of segments emitted (>= 1, and it must
+     * fit in int), or 0 to signal that `lineno` is at or past the end of the
+     * document.
      *
      * Must be deterministic for a given (lineno, width): paige may call it more
      * than once for the same line (e.g. on redraw or scroll).

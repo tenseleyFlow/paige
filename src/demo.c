@@ -8,6 +8,7 @@
 #include "paige.h"
 
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,8 @@ struct doc {
     size_t nlines;
     const char *path;
     const char *title;
+    char *hlbuf; /* reused highlight scratch, grown as needed */
+    size_t hlcap;
 };
 
 static int line_bounds(struct doc *d, size_t L, size_t *start, size_t *len)
@@ -68,7 +71,7 @@ static int match_cmp(const void *a, const void *b)
     return 0;
 }
 
-static void emit_highlighted(paige_sink *sink, const char *bytes,
+static void emit_highlighted(struct doc *d, paige_sink *sink, const char *bytes,
                              size_t seg_start, size_t len,
                              const paige_match *matches, size_t nmatches)
 {
@@ -87,12 +90,19 @@ static void emit_highlighted(paige_sink *sink, const char *bytes,
         return;
     }
 
+    /* Reuse a per-document scratch buffer instead of malloc/free per segment
+     * per row per frame while a search is active. */
     size_t cap = len + overlaps * SGR_LEN * 2;
-    char *out = malloc(cap);
-    if (!out) {
-        paige_emit(sink, bytes, len);
-        return;
+    if (d->hlcap < cap) {
+        char *nb = realloc(d->hlbuf, cap);
+        if (!nb) {
+            paige_emit(sink, bytes, len); /* degrade: emit unhighlighted */
+            return;
+        }
+        d->hlbuf = nb;
+        d->hlcap = cap;
     }
+    char *out = d->hlbuf;
 
     size_t pos = 0, out_len = 0;
     for (size_t i = 0; i < nmatches && pos < len; i++) {
@@ -119,7 +129,6 @@ static void emit_highlighted(paige_sink *sink, const char *bytes,
         out_len += len - pos;
     }
     paige_emit(sink, out, out_len);
-    free(out);
 }
 
 static int render_line_ex(void *ctx, const paige_render_req *req,
@@ -153,18 +162,21 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
             size_t off = req->hscroll < len ? req->hscroll : len;
             size_t chunk =
                 len - off < (size_t)width ? len - off : (size_t)width;
-            emit_highlighted(sink, d->data + start + off, off, chunk, matches,
-                             nmatches);
+            emit_highlighted(d, sink, d->data + start + off, off, chunk,
+                             matches, nmatches);
         }
         return 1;
     }
 
     size_t total = (len + (size_t)width - 1) / (size_t)width;
+    if (total > (size_t)INT_MAX)
+        total =
+            (size_t)INT_MAX; /* render_line returns int: clamp absurd lines */
     size_t emitted = 0;
     for (size_t s = req->seg_first; s < total && emitted < req->seg_max; s++) {
         size_t i = s * (size_t)width;
         size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
-        emit_highlighted(sink, d->data + start + i, i, chunk, matches,
+        emit_highlighted(d, sink, d->data + start + i, i, chunk, matches,
                          nmatches);
         emitted++;
     }
@@ -326,5 +338,6 @@ int main(int argc, char **argv)
     }
     free(d.data);
     free(d.line);
+    free(d.hlbuf);
     return 0;
 }

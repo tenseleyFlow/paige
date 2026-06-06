@@ -725,7 +725,8 @@ int main(void)
     pty_wait_for(master, buf, sizeof buf, "line009", WAIT_MS);
     pty_send_text(master, "G");
     pty_wait_for(master, buf, sizeof buf, "line120", WAIT_MS);
-    pty_send_text(master, "/line005\n"); /* only matches above -> wraps */
+    pty_drain(master, buf, sizeof buf, 150); /* settle before the search */
+    pty_send_text(master, "/line005\n");     /* only matches above -> wraps */
     pty_wait_for(master, buf, sizeof buf, "search wrapped", WAIT_MS);
     if (!pty_has(buf, "search wrapped") || !pty_has(buf, "line005")) {
         printf("FAIL: forward search past EOF did not wrap to line 5\n");
