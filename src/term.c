@@ -21,6 +21,8 @@ static void on_winch(int sig)
 /* The active terminal, for the fatal-signal restore path. */
 static struct paige_term *g_active = NULL;
 
+static void term_leave(struct paige_term *t, int nonblock);
+
 /*
  * Put the terminal back if a fatal signal kills us mid-page. Without this an
  * external SIGTERM/SIGHUP (or any signal whose default action terminates the
@@ -31,25 +33,41 @@ static struct paige_term *g_active = NULL;
 static void on_fatal(int sig)
 {
     if (g_active) {
-        paige_term_leave(g_active);
+        /* Best-effort restore: never block on a wedged/orphaned tty, so we
+         * always reach raise() and the (now-default, SA_RESETHAND) signal
+         * terminates us promptly. */
+        term_leave(g_active, 1);
         g_active = NULL;
     }
     raise(sig);
 }
 
-static void write_all(int fd, const char *s)
+/* Write a NUL-terminated string in full. When `nonblock`, the fd is flipped to
+ * O_NONBLOCK for the duration and a would-block (EAGAIN) aborts the write
+ * rather than hanging — used on the fatal-signal path so a wedged or orphaned
+ * tty (full output buffer, no reader) can never trap the handler before it
+ * re-raises. */
+static void write_all(int fd, const char *s, int nonblock)
 {
+    int saved = -1;
+    if (nonblock) {
+        saved = fcntl(fd, F_GETFL);
+        if (saved >= 0)
+            (void)fcntl(fd, F_SETFL, saved | O_NONBLOCK);
+    }
     size_t n = strlen(s);
     while (n > 0) {
         ssize_t w = write(fd, s, n);
         if (w < 0) {
             if (errno == EINTR)
                 continue;
-            break;
+            break; /* EAGAIN on a wedged tty, or a real error: give up */
         }
         s += w;
         n -= (size_t)w;
     }
+    if (nonblock && saved >= 0)
+        (void)fcntl(fd, F_SETFL, saved);
 }
 
 bool paige_term_open(struct paige_term *t)
@@ -118,23 +136,38 @@ void paige_term_enter(struct paige_term *t)
     sigaction(SIGHUP, &fa, NULL);
     g_active = t;
 
-    write_all(t->out_fd, "\x1b[?1049h" /* alt screen */
-                         "\x1b[?25l" /* hide cursor */);
+    write_all(t->out_fd,
+              "\x1b[?1049h" /* alt screen */
+              "\x1b[?25l" /* hide cursor */,
+              0);
     t->alt = true;
+}
+
+/* Restore the terminal. On the fatal-signal path `nonblock` is set so a wedged
+ * or orphaned tty cannot trap us: the escape-sequence write is non-blocking,
+ * and tcsetattr uses TCSANOW. The normal exit path uses TCSAFLUSH (change once
+ * output has drained, flush input) for a clean restore — but TCSAFLUSH *drains
+ * output* first, which blocks forever on a wedged tty, so the signal path must
+ * not use it. TCSANOW changes immediately without draining. */
+static void term_leave(struct paige_term *t, int nonblock)
+{
+    if (t->alt) {
+        write_all(t->out_fd,
+                  "\x1b[?25h" /* show cursor */
+                  "\x1b[?1049l" /* leave alt screen */,
+                  nonblock);
+        t->alt = false;
+    }
+    if (t->raw) {
+        tcsetattr(t->tty_fd, nonblock ? TCSANOW : TCSAFLUSH, &t->orig);
+        t->raw = false;
+    }
+    g_active = NULL;
 }
 
 void paige_term_leave(struct paige_term *t)
 {
-    if (t->alt) {
-        write_all(t->out_fd, "\x1b[?25h" /* show cursor */
-                             "\x1b[?1049l" /* leave alt screen */);
-        t->alt = false;
-    }
-    if (t->raw) {
-        tcsetattr(t->tty_fd, TCSAFLUSH, &t->orig);
-        t->raw = false;
-    }
-    g_active = NULL;
+    term_leave(t, 0);
 }
 
 /* Read one byte from the tty, or -1 on EINTR/EOF. */
