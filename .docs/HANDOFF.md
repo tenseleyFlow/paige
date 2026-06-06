@@ -70,7 +70,10 @@ detects the full emission (`sl->n == total`) and indexes from `S`.
 - **Follow mode** (`F`, tail-f style) via the host `refresh` hook; pauses on
   manual nav, and highlights freshly-appended lines (`paige_render_req.appended`).
 - **Terminal safety**: ISIG/IXON cleared so the pager owns Ctrl-C/Ctrl-S;
-  SA_RESETHAND handlers restore the terminal on any fatal signal.
+  SA_RESETHAND handlers restore the terminal on any fatal signal. The fatal-path
+  restore is non-blocking (O_NONBLOCK write + `TCSANOW`, not `TCSAFLUSH`) so a
+  wedged or orphaned tty — full output buffer, no reader — can't trap the handler;
+  the process always reaches `raise()` and dies on a single SIGTERM.
 - `quit_if_one_screen`: print plainly and return when the content fits.
 - Tested via the pty harness on Linux, macOS, FreeBSD (CI). ASan/UBSan clean,
   builds `-Werror` under GNU make and bmake.

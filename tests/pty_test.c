@@ -432,6 +432,64 @@ int main(void)
         fails++;
     }
 
+    /* SIGTERM must kill us even when the tty is WEDGED — output buffer full
+     * with no reader (an orphaned pty / disconnected terminal). The fatal
+     * handler's restore must not block (non-blocking write + TCSANOW);
+     * otherwise the process becomes un-SIGTERM-able and only `kill -9` works.
+     *
+     * Skipped on macOS: its pseudo-terminal flow-control makes "wedge the
+     * output buffer" unreliable to reproduce in a test harness. The fix is
+     * portable POSIX (verified on Linux + FreeBSD CI and locally). */
+#if !defined(__APPLE__)
+    pid = spawn_demo(&master, &ws, tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "line001", WAIT_MS);
+    /* A separate flooder process feeds input without anyone reading the demo's
+     * output, so the demo renders frame after frame until its output write
+     * blocks on the full pty buffer — a wedged tty. The flooder's own writes
+     * may block once the input buffer fills; that's fine because it is a child
+     * we SIGKILL. Decoupling the flood keeps the TEST from ever blocking,
+     * portably (pty O_NONBLOCK / select-for-write are unreliable across
+     * macOS/BSD). */
+    pid_t flooder = fork();
+    if (flooder == 0) {
+        for (;;)
+            if (write(master, "j", 1) != 1)
+                _exit(0);
+    }
+    usleep(400000); /* let the demo wedge on output */
+    kill(pid, SIGTERM);
+    /* Bounded wait — never block forever, or a regression hangs the suite. */
+    {
+        int died = 0;
+        for (int i = 0; i < 200; i++) { /* up to ~4s */
+            if (waitpid(pid, &status, WNOHANG) == pid) {
+                died = 1;
+                break;
+            }
+            usleep(20000);
+        }
+        if (!died) {
+            printf("FAIL: SIGTERM did not kill a demo on a wedged tty "
+                   "(un-SIGTERM-able)\n");
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            fails++;
+        } else if (!(WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM)) {
+            printf("FAIL: wedged demo did not terminate via SIGTERM\n");
+            fails++;
+        }
+    }
+    if (flooder > 0) {
+        kill(flooder, SIGKILL);
+        waitpid(flooder, NULL, 0);
+    }
+    close(master);
+#endif /* !__APPLE__ */
+
     setenv("PAIGE_NO_RAW", "1", 1);
     pid = spawn_demo(&master, &ws, tmpl);
     if (pid < 0) {
