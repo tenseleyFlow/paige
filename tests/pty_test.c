@@ -689,6 +689,80 @@ int main(void)
     finish_demo(master, pid, buf, sizeof buf, &status);
     unlink(wrap_tmpl);
 
+    /* SIGWINCH: shrinking the terminal must reflow without a keypress. */
+    pid = spawn_demo(&master, &ws, tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "line009", WAIT_MS);
+    pty_drain(master, buf, sizeof buf,
+              200); /* consume the rest of the screen */
+    struct winsize small = ws;
+    small.ws_row = 5; /* body shrinks 9 -> 4 rows */
+    if (ioctl(master, TIOCSWINSZ, &small) != 0)
+        perror("TIOCSWINSZ");
+    pty_wait_for(master, buf, sizeof buf, "line004",
+                 WAIT_MS); /* fresh redraw */
+    if (!pty_has(buf, "line001") || pty_has(buf, "line009")) {
+        printf("FAIL: SIGWINCH resize did not reflow to fewer rows\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "q");
+    finish_demo(master, pid, buf, sizeof buf, &status);
+
+    /* A forward search with no match below the cursor must wrap and say so. */
+    pid = spawn_demo(&master, &ws, tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "line009", WAIT_MS);
+    pty_send_text(master, "G");
+    pty_wait_for(master, buf, sizeof buf, "line120", WAIT_MS);
+    pty_send_text(master, "/line005\n"); /* only matches above -> wraps */
+    pty_wait_for(master, buf, sizeof buf, "search wrapped", WAIT_MS);
+    if (!pty_has(buf, "search wrapped") || !pty_has(buf, "line005")) {
+        printf("FAIL: forward search past EOF did not wrap to line 5\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "q");
+    finish_demo(master, pid, buf, sizeof buf, &status);
+
+    /* Empty file: the demo's quit_if_one_screen prints nothing and exits 0
+     * (a one-line empty doc fits a screen); it must not crash or hang. */
+    char empty_tmpl[4096];
+    mk_tmpl(empty_tmpl, sizeof empty_tmpl, "paige_empty_XXXXXX");
+    int efd = mkstemp(empty_tmpl);
+    if (efd < 0) {
+        perror("mkstemp");
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        return 1;
+    }
+    close(efd); /* leave it 0 bytes */
+    pid = spawn_demo(&master, &ws, empty_tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        unlink(empty_tmpl);
+        return 1;
+    }
+    finish_demo(master, pid, buf, sizeof buf, &status);
+    if (!WIFEXITED(status)) {
+        printf("FAIL: empty-file pager did not exit cleanly\n");
+        fails++;
+    }
+    unlink(empty_tmpl);
+
     unlink(tmpl);
     unlink(follow_tmpl);
     unlink(chop_tmpl);

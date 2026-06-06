@@ -355,6 +355,9 @@ static bool search_forward_doc(struct view *v, const char *pattern,
         if (scan_should_stop(v, &scanned, max_scan))
             return false; /* preview window exhausted, or user cancelled */
     }
+    if (max_scan != SEARCH_SCAN_ALL)
+        return false; /* bounded preview: never wrap (only a committed search)
+                       */
     for (size_t L = 0; raw_line(v->doc, L, &line); L++) {
         if (v->stats)
             v->stats->search_lines++;
@@ -410,6 +413,9 @@ static bool search_backward_doc(struct view *v, const char *pattern,
             break;
     }
 
+    if (max_scan != SEARCH_SCAN_ALL)
+        return false; /* bounded preview: never wrap (only a committed search)
+                       */
     size_t last;
     if (!last_raw_line(v, &last))
         return false;
@@ -1204,10 +1210,13 @@ static void print_plain(const paige_doc *doc, paige_stats *stats,
                         struct seglist *sl, int width)
 {
     for (size_t L = 0;; L++) {
-        int n = render_line(doc, stats, sl, L, width);
+        /* Emit every segment (seg_max = all), not count-only — print_plain
+         * actually writes the seglist, unlike segcount. */
+        int n = render_line_matches(doc, stats, sl, L, width, PAIGE_RENDER_WRAP,
+                                    0, NULL, 0, 0, (size_t)-1);
         if (n == 0)
             break;
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < sl->n; i++) {
             write_counted(STDOUT_FILENO, sl->buf + sl->seg[i].off,
                           sl->seg[i].len, stats);
             write_counted(STDOUT_FILENO, "\n", 1, stats);
