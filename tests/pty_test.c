@@ -52,12 +52,13 @@ static void mk_tmpl(char *out, size_t cap, const char *stem)
     snprintf(out, cap, "%s/%s", d, stem);
 }
 
-/* Pull the render-call counter out of the demo's "paige-stats: render=N ..."
- * line, or -1 if absent. Used to assert an interaction stayed O(screen). */
-static long stat_render(const char *buf)
+/* Pull a counter (e.g. "render=" or "search=") out of the demo's
+ * "paige-stats: render=N frames=N ... search=N ..." line, or -1 if absent.
+ * Used to assert an interaction stayed bounded. */
+static long stat_field(const char *buf, const char *key)
 {
-    const char *p = strstr(buf, "render=");
-    return p ? atol(p + 7) : -1;
+    const char *p = strstr(buf, key);
+    return p ? atol(p + strlen(key)) : -1;
 }
 
 static pid_t spawn_demo(int *master, struct winsize *ws, const char *path)
@@ -556,8 +557,9 @@ int main(void)
     }
     pty_send_text(master, "q");
     finish_demo(master, pid, buf, sizeof buf, &status);
-    /* G on a large known-length doc must stay lazy: jump to the final screen
-     * without rendering every line (goto_bottom was O(document)). */
+    /* On a large known-length doc: G stays O(screen) (goto_bottom was
+     * O(document)), and incremental search stays bounded per keystroke (it did
+     * a full forward+wraparound scan on every character typed). */
     char big_tmpl[4096];
     mk_tmpl(big_tmpl, sizeof big_tmpl, "paige_big_XXXXXX");
     int bfd = mkstemp(big_tmpl);
@@ -568,9 +570,10 @@ int main(void)
         unlink(chop_tmpl);
         return 1;
     }
-    for (int i = 1; i <= 10000; i++) {
+    enum { BIG_LINES = 100000 };
+    for (int i = 1; i <= BIG_LINES; i++) {
         char line[16];
-        int m = snprintf(line, sizeof line, "L%05d\n", i);
+        int m = snprintf(line, sizeof line, "L%06d\n", i);
         (void)!write(bfd, line, (size_t)m);
     }
     close(bfd);
@@ -582,16 +585,34 @@ int main(void)
         unlink(big_tmpl);
         return 1;
     }
-    pty_wait_for(master, buf, sizeof buf, "L00001", WAIT_MS);
+    pty_wait_for(master, buf, sizeof buf, "L000001", WAIT_MS);
     pty_send_text(master, "G");
-    pty_wait_for(master, buf, sizeof buf, "L10000", WAIT_MS);
+    pty_wait_for(master, buf, sizeof buf, "L100000", WAIT_MS);
+    /* Back to the top, then type a never-matching pattern one char at a time.
+     * Each keystroke must scan at most the preview window, not the whole file.
+     */
+    pty_send_text(master, "g");
+    pty_wait_for(master, buf, sizeof buf, "L000001", WAIT_MS);
+    pty_send_text(master, "/zzzzzzzz"); /* 8 chars, no Enter */
+    pty_drain(master, buf, sizeof buf, 300);
+    pty_send(master, "\x1b", 1); /* cancel the search */
+    pty_wait_for(master, buf, sizeof buf, "L000001", WAIT_MS);
     pty_send_text(master, "q");
     pty_wait_for(master, buf, sizeof buf, "paige-stats:", WAIT_MS);
-    long rc = stat_render(buf);
+    long rc = stat_field(buf, "render=");
+    long sl = stat_field(buf, "search_lines=");
     if (rc < 0 || rc > 1000) {
-        printf("FAIL: G rendered %ld lines on a 10000-line doc (expected "
+        printf("FAIL: G rendered %ld lines on a %d-line doc (expected "
                "O(screen), not O(document))\n",
-               rc);
+               rc, BIG_LINES);
+        fails++;
+    }
+    /* 8 keystrokes * 10000-line preview window = ~80k; an unbounded
+     * per-keystroke forward+wrap scan would be ~1.6M. */
+    if (sl < 0 || sl > 250000) {
+        printf("FAIL: incremental search scanned %ld lines on a %d-line doc "
+               "(expected bounded per keystroke)\n",
+               sl, BIG_LINES);
         fails++;
     }
     finish_demo(master, pid, buf, sizeof buf, &status);

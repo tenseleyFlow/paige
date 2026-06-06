@@ -141,7 +141,15 @@ enum {
     SEARCH_MATCH_MAX = 64,
     STATUS_MAX = 96,
     MARK_COUNT = 256,
+    /* While typing an incremental search, scan at most this many lines per
+     * keystroke so a miss on a huge document stays responsive instead of
+     * walking the whole file (and wrapping) on every character. Enter runs the
+     * authoritative unbounded search. */
+    SEARCH_PREVIEW_MAX = 10000,
 };
+
+/* Sentinel max_scan: search the whole document (no per-keystroke bound). */
+#define SEARCH_SCAN_ALL ((size_t)-1)
 
 enum search_dir {
     SEARCH_FORWARD = 1,
@@ -286,11 +294,13 @@ static bool raw_line(const paige_doc *doc, size_t L, paige_line *line)
 
 static bool search_forward_doc(struct view *v, const char *pattern,
                                size_t pattern_len, size_t start_L,
-                               size_t start_off, struct search_hit *hit)
+                               size_t start_off, struct search_hit *hit,
+                               size_t max_scan)
 {
     bool case_sensitive = paige_search_smart_case(pattern, pattern_len);
     paige_line line;
     size_t off;
+    size_t scanned = 0;
 
     for (size_t L = start_L; raw_line(v->doc, L, &line); L++) {
         if (v->stats)
@@ -302,6 +312,8 @@ static bool search_forward_doc(struct view *v, const char *pattern,
             *hit = (struct search_hit){L, off, pattern_len, false};
             return true;
         }
+        if (++scanned >= max_scan)
+            return false; /* bounded preview: stop without wrapping */
     }
     for (size_t L = 0; raw_line(v->doc, L, &line); L++) {
         if (v->stats)
@@ -311,6 +323,8 @@ static bool search_forward_doc(struct view *v, const char *pattern,
             *hit = (struct search_hit){L, off, pattern_len, true};
             return true;
         }
+        if (++scanned >= max_scan)
+            return false;
     }
     return false;
 }
@@ -330,11 +344,13 @@ static bool last_raw_line(struct view *v, size_t *last)
 
 static bool search_backward_doc(struct view *v, const char *pattern,
                                 size_t pattern_len, size_t start_L,
-                                size_t before, struct search_hit *hit)
+                                size_t before, struct search_hit *hit,
+                                size_t max_scan)
 {
     bool case_sensitive = paige_search_smart_case(pattern, pattern_len);
     paige_line line;
     size_t off;
+    size_t scanned = 0;
 
     for (size_t i = start_L + 1; i-- > 0;) {
         if (raw_line(v->doc, i, &line)) {
@@ -347,6 +363,8 @@ static bool search_backward_doc(struct view *v, const char *pattern,
                 *hit = (struct search_hit){i, off, pattern_len, false};
                 return true;
             }
+            if (++scanned >= max_scan)
+                return false; /* bounded preview: stop without wrapping */
         }
         if (i == 0)
             break;
@@ -365,6 +383,8 @@ static bool search_backward_doc(struct view *v, const char *pattern,
                 *hit = (struct search_hit){i, off, pattern_len, true};
                 return true;
             }
+            if (++scanned >= max_scan)
+                return false;
         }
         if (i == 0)
             break;
@@ -373,7 +393,7 @@ static bool search_backward_doc(struct view *v, const char *pattern,
 }
 
 static bool search_doc(struct view *v, int dir, size_t start_L, size_t boundary,
-                       struct search_hit *hit)
+                       struct search_hit *hit, size_t max_scan)
 {
     size_t pattern_len;
     const char *pattern = search_pattern(v->search, &pattern_len);
@@ -381,8 +401,9 @@ static bool search_doc(struct view *v, int dir, size_t start_L, size_t boundary,
         return false;
     if (dir == SEARCH_FORWARD)
         return search_forward_doc(v, pattern, pattern_len, start_L, boundary,
-                                  hit);
-    return search_backward_doc(v, pattern, pattern_len, start_L, boundary, hit);
+                                  hit, max_scan);
+    return search_backward_doc(v, pattern, pattern_len, start_L, boundary, hit,
+                               max_scan);
 }
 
 static void search_activate(struct view *v, const struct search_hit *hit)
@@ -416,10 +437,10 @@ static void search_not_found(struct view *v)
 }
 
 static bool search_run_from(struct view *v, int dir, size_t start_L,
-                            size_t boundary)
+                            size_t boundary, size_t max_scan)
 {
     struct search_hit hit;
-    if (search_doc(v, dir, start_L, boundary, &hit)) {
+    if (search_doc(v, dir, start_L, boundary, &hit, max_scan)) {
         search_activate(v, &hit);
         return true;
     }
@@ -427,6 +448,10 @@ static bool search_run_from(struct view *v, int dir, size_t start_L,
     return false;
 }
 
+/* Live preview while the user is still typing the pattern: bounded forward (or
+ * backward) scan from the origin, no wrap-around, so each keystroke stays cheap
+ * on a huge document. A miss here is silent — it may just be past the preview
+ * window; Enter runs the full search and reports a real not-found. */
 static void search_refresh_entry(struct view *v, const struct view_pos *origin)
 {
     if (v->search->entry_len == 0) {
@@ -437,9 +462,12 @@ static void search_refresh_entry(struct view *v, const struct view_pos *origin)
     }
     view_restore(v, origin);
     search_run_from(v, v->search->entry_dir, origin->L,
-                    v->search->entry_dir == SEARCH_FORWARD ? 0 : (size_t)-1);
-    if (!v->search->active)
+                    v->search->entry_dir == SEARCH_FORWARD ? 0 : (size_t)-1,
+                    SEARCH_PREVIEW_MAX);
+    if (!v->search->active) {
         view_restore(v, origin);
+        search_clear_message(v->search);
+    }
 }
 
 static void search_copy_entry_to_pattern(struct search_state *s)
@@ -498,14 +526,16 @@ static int search_enter(struct view *v, struct paige_term *t, struct outbuf *o,
                 *v->search = saved;
                 view_restore(v, &origin);
             } else {
-                bool found = v->search->active;
-                char message[SEARCH_STATUS_MAX];
-                memcpy(message, v->search->message, sizeof message);
                 search_copy_entry_to_pattern(v->search);
                 v->search->entering = false;
-                if (!found)
-                    memcpy(v->search->message, message, sizeof message);
-                else
+                /* Authoritative unbounded search from the origin: the live
+                 * preview was bounded and may have missed a far match. */
+                view_restore(v, &origin);
+                bool found = search_run_from(
+                    v, v->search->dir, origin.L,
+                    v->search->dir == SEARCH_FORWARD ? 0 : (size_t)-1,
+                    SEARCH_SCAN_ALL);
+                if (found)
                     view_note_previous(v, &origin);
             }
             return PK_NONE;
@@ -541,11 +571,13 @@ static void search_repeat(struct view *v, int dir)
     if (dir == SEARCH_FORWARD) {
         size_t start_L = v->search->active ? v->search->active_L : v->L;
         size_t start_off = v->search->active ? v->search->active_off + 1 : 0;
-        found = search_run_from(v, SEARCH_FORWARD, start_L, start_off);
+        found = search_run_from(v, SEARCH_FORWARD, start_L, start_off,
+                                SEARCH_SCAN_ALL);
     } else {
         size_t start_L = v->search->active ? v->search->active_L : v->L;
         size_t before = v->search->active ? v->search->active_off : (size_t)-1;
-        found = search_run_from(v, SEARCH_BACKWARD, start_L, before);
+        found = search_run_from(v, SEARCH_BACKWARD, start_L, before,
+                                SEARCH_SCAN_ALL);
     }
     if (found)
         view_note_previous(v, &origin);
