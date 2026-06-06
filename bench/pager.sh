@@ -196,6 +196,29 @@ else
     printf 'bench mode=skip name=moar status=missing\n'
 fi
 
+# mat is the production host that embeds the paige engine. This is the honest
+# "is the engine already at parity with less?" comparison: mat indexes lazily
+# (mmap + on-demand newline index) where the paige-demo above slurps eagerly.
+# Decorations/highlighting are off so we measure mat's paging+indexing path, not
+# its optional render cost -- the same plain workload less does. Point $MAT at a
+# build, or have `mat` on PATH.
+#
+# Only in full runs, never under --smoke: mat probes the terminal on startup and
+# can stall briefly under this minimal bench pty (the driver's 15s timeout caps
+# it). The perf gate runs --smoke and only reads the demo's own counters, so it
+# must never depend on driving a full external app like mat.
+MAT=${MAT:-mat}
+MAT_PLAIN="--paging=always --decorations=never --color=never"
+if [ "$SMOKE" -eq 0 ] && command -v "$MAT" >/dev/null 2>&1; then
+    run_driver first mat -- "$MAT" $MAT_PLAIN "$FIXTURE"
+    run_driver jump mat -- "$MAT" $MAT_PLAIN "$FIXTURE"
+    run_driver search mat-late PAIGE_NEEDLE_LATE -- "$MAT" $MAT_PLAIN "$FIXTURE"
+    run_driver first mat-huge -- "$MAT" $MAT_PLAIN "$HUGE_FIXTURE"
+else
+    printf 'bench mode=skip name=mat status=%s\n' \
+        "$([ "$SMOKE" -eq 1 ] && echo smoke-excluded || echo missing)"
+fi
+
 if [ "$KEEP" -eq 0 ] && [ "$SMOKE" -eq 1 ]; then
     rm -f "$FIXTURE" "$HUGE_FIXTURE"
 fi
