@@ -35,7 +35,22 @@ field()   { printf '%s\n' "$1" | sed -n "s/.*[ ]$2=\\([0-9][0-9]*\\).*/\\1/p"; }
 jmax()    { grep "\"$1\"" "$BASELINE" | sed -n "s/.*\"$2\": *\\([0-9][0-9]*\\).*/\\1/p"; }
 
 echo "perf-gate: running smoke bench (1 MiB corpus, fixed 24x80 tty)"
-OUT=$(sh "$ROOT/bench/pager.sh" --smoke)
+# The demo always prints its counters on quit; render=-1 on a paige row means the
+# pty driver missed the stats line (a transient capture miss under load), not a
+# perf regression. Retry a few times so a loaded CI runner does not flake the
+# gate; a genuine regression yields a large POSITIVE number, never -1.
+attempt=1
+while : ; do
+    OUT=$(sh "$ROOT/bench/pager.sh" --smoke)
+    printf '%s\n' "$OUT" | grep -E ' name=paige[a-z-]* .* render=-1 ' >/dev/null 2>&1 ||
+        break
+    if [ "$attempt" -ge 3 ]; then
+        echo "perf-gate: WARNING stats capture missed after 3 attempts"
+        break
+    fi
+    echo "perf-gate: demo stats capture missed (attempt $attempt); retrying"
+    attempt=$((attempt + 1))
+done
 
 breaches=0
 
@@ -63,19 +78,40 @@ for line in $GATES; do
     fi
     r=$(field "$row" render)
     s=$(field "$row" segments)
+    hi=$(field "$row" host_indexed)
     if [ "$SHOW" -eq 1 ]; then
-        printf '  %-24s render=%s segments=%s\n' "$key" "$r" "$s"
+        printf '  %-24s render=%s segments=%s host_indexed=%s\n' \
+            "$key" "$r" "$s" "$hi"
         IFS='
 '
         continue
     fi
     rmax=$(jmax "$key" render_max)
     smax=$(jmax "$key" segments_max)
+    himax=$(jmax "$key" host_indexed_max) # optional: empty if not gated
     ok=1
+    if [ -z "$r" ] || [ -z "$s" ]; then
+        ok=0
+        echo "  FAIL: $key -- counters unreadable (render='$r' segments='$s'); stats capture missed"
+        breaches=$((breaches + 1))
+        IFS='
+'
+        continue
+    fi
     [ "$r" -le "$rmax" ] || { ok=0; echo "  FAIL: $key render=$r > max $rmax (O(screen) regression?)"; }
     [ "$s" -le "$smax" ] || { ok=0; echo "  FAIL: $key segments=$s > max $smax"; }
+    if [ -n "$himax" ] && { [ -z "$hi" ] || [ "$hi" -gt "$himax" ]; }; then
+        ok=0
+        echo "  FAIL: $key host_indexed=$hi > max $himax (eager host indexing?)"
+    fi
     if [ "$ok" -eq 1 ]; then
-        printf '  PASS: %-24s render=%s/%s segments=%s/%s\n' "$key" "$r" "$rmax" "$s" "$smax"
+        if [ -n "$himax" ]; then
+            printf '  PASS: %-24s render=%s/%s segments=%s/%s host_indexed=%s/%s\n' \
+                "$key" "$r" "$rmax" "$s" "$smax" "$hi" "$himax"
+        else
+            printf '  PASS: %-24s render=%s/%s segments=%s/%s\n' \
+                "$key" "$r" "$rmax" "$s" "$smax"
+        fi
     else
         breaches=$((breaches + 1))
     fi

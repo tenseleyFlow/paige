@@ -224,9 +224,10 @@ int main(int argc, char **argv)
     printf(
         "bench mode=%s name=%s elapsed_ms=%.3f first_ms=%.3f "
         "rss_max=%ld pty_bytes=%zu pty_reads=%zu render=%ld search_lines=%ld "
-        "segments=%ld status=%s\n",
+        "segments=%ld host_indexed=%ld status=%s\n",
         mode, name, elapsed_ms, first_ms, ru.ru_maxrss, pty_bytes, pty_reads,
         parse_field(tail, "render="), parse_field(tail, "search_lines="),
-        parse_field(tail, "segments="), status);
+        parse_field(tail, "segments="), parse_field(tail, "host_indexed="),
+        status);
     return strcmp(status, "ok") == 0 ? 0 : 1;
 }
