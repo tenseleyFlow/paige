@@ -1101,22 +1101,29 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
     int S = v->S;
     bool at_eof = false;
 
+    int content_w = view_content_width(v);
+    unsigned flags = v->chop ? PAIGE_RENDER_CHOP : PAIGE_RENDER_WRAP;
+    paige_match matches[SEARCH_MATCH_MAX];
+    size_t nmatches = 0;
+    int n = 0;
+    bool have_line = false; /* line L already rendered into the seglist? */
+
     for (int row = 0; row < body; row++) {
         if (v->stats)
             v->stats->rows_drawn++;
         ob_str(o, "\x1b[K"); /* clear to end of line */
-        paige_match matches[SEARCH_MATCH_MAX];
-        size_t nmatches = 0;
-        if (!at_eof)
+        /* Render each logical line at most once per frame and consume its
+         * segments across the rows it spans, instead of re-rendering the whole
+         * line for every row (which made a wrapped line O(rows * line)). */
+        if (!at_eof && !have_line) {
             nmatches = collect_matches(v, L, matches, SEARCH_MATCH_MAX);
-        int content_w = view_content_width(v);
-        unsigned flags = v->chop ? PAIGE_RENDER_CHOP : PAIGE_RENDER_WRAP;
-        int n = at_eof
-                    ? 0
-                    : render_line_matches(v->doc, v->stats, v->sl, L, content_w,
-                                          flags, v->hscroll, matches, nmatches);
-        if (n == 0) {
-            at_eof = true;
+            n = render_line_matches(v->doc, v->stats, v->sl, L, content_w,
+                                    flags, v->hscroll, matches, nmatches);
+            have_line = true;
+            if (n == 0)
+                at_eof = true;
+        }
+        if (at_eof) {
             ob_str(o, "~");
         } else {
             if (v->chop)
@@ -1128,6 +1135,7 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
             if (++S >= n) {
                 L++;
                 S = 0;
+                have_line = false;
             }
         }
         ob_str(o, "\r\n");
