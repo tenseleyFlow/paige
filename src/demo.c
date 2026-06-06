@@ -264,6 +264,11 @@ static int refresh_doc(void *ctx)
 int main(int argc, char **argv)
 {
     const char *path = argc > 1 ? argv[1] : NULL;
+    if (path && (strcmp(path, "--version") == 0 || strcmp(path, "-V") == 0)) {
+        printf("paige-demo (paige %d.%d.%d)\n", PAIGE_VERSION_MAJOR,
+               PAIGE_VERSION_MINOR, PAIGE_VERSION_PATCH);
+        return 0;
+    }
     if (path == NULL && isatty(STDIN_FILENO)) {
         fprintf(stderr, "usage: paige-demo FILE (or pipe content on stdin)\n");
         return 2;

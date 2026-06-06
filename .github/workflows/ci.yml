@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: pipx install clang-format==19.1.7
       - run: clang-format --dry-run -Werror src/*.c src/*.h include/*.h bench/*.c examples/*.c
 
@@ -27,8 +27,11 @@ jobs:
     timeout-minutes: 8
     env:
       CC: ${{ matrix.cc }}
+      # CI always has a pty, so a missing one is a real regression, not an
+      # unsupported environment — fail the pager test instead of skipping it.
+      PAIGE_TEST_STRICT: 1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build (warnings are errors)
         run: make CFLAGS="-std=c11 -O2 -Werror"
       - name: Build examples
@@ -40,20 +43,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
           run: |
             make CFLAGS="-std=c11 -O2 -Werror"
             make examples CFLAGS="-std=c11 -O2 -Werror"
-            make test
+            PAIGE_TEST_STRICT=1 make test
 
   benchmark-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Benchmark script smoke test
         run: make bench-smoke
 
@@ -63,9 +66,9 @@ jobs:
     env:
       CC: clang
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build with ASan/UBSan and run PTY tests
-        run: make CFLAGS="-std=c11 -O2 -g -fsanitize=address,undefined" && make test
+        run: make CFLAGS="-std=c11 -O2 -g -fsanitize=address,undefined" && PAIGE_TEST_STRICT=1 make test
 
   all-jobs:
     if: always()
