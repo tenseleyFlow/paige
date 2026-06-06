@@ -1,0 +1,10 @@
+{
+  "_comment": "Enforcing regression gate on paige's DETERMINISTIC engine counters. Unlike wall-clock, render/segments are O(screen): exact at a fixed 24x80 tty and constant across file size, so a blow-up means an algorithmic regression (e.g. wrap going O(line) again). 'seen' is the measured value at a 1 MiB smoke corpus (identical at 64 MiB, see BASELINE.md); 'max' is the gate. Re-record by running bench/check.sh --show and bumping the maxes with headroom. search_* counters are intentionally NOT gated -- they scale with corpus/codebase size.",
+  "term": { "rows": 24, "cols": 80 },
+  "gates": {
+    "first.paige":           { "render_seen": 48, "render_max": 60,  "segments_seen": 23, "segments_max": 30 },
+    "jump.paige":            { "render_seen": 94, "render_max": 130, "segments_seen": 46, "segments_max": 64 },
+    "first.paige-huge-wrap": { "render_seen": 2,  "render_max": 8,   "segments_seen": 23, "segments_max": 30 },
+    "first.paige-huge-chop": { "render_seen": 3,  "render_max": 8,   "segments_seen": 1,  "segments_max": 4 }
+  }
+}
