@@ -209,6 +209,7 @@ struct view {
     int tty_fd; /* for cancelling a long search; <=0 disables */
     int width;
     bool chop;
+    bool ruler; /* show a column ruler row (chop mode) */
     size_t hscroll;
     bool follow;
     unsigned long long follow_updates;
@@ -1180,6 +1181,24 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
     unsigned flags = v->chop ? PAIGE_RENDER_CHOP : PAIGE_RENDER_WRAP;
     paige_match matches[SEARCH_MATCH_MAX];
     size_t nmatches = 0;
+
+    /* Optional column ruler (chop mode): one row of ticks aligned to the
+     * content area, '|' every 10 columns and '+' every 5, reflecting hscroll.
+     */
+    if (v->ruler && v->chop && body > 1) {
+        ob_str(o, "\x1b[K "); /* leading space aligns past the chop marker */
+        char rul[512];
+        size_t rn = 0;
+        for (int i = 0; i < content_w && rn < sizeof rul - 1; i++) {
+            size_t c = v->hscroll + (size_t)i + 1;
+            rul[rn++] = (c % 10 == 0) ? '|' : (c % 5 == 0) ? '+' : '.';
+        }
+        rul[rn] = '\0';
+        ob_str(o, rul);
+        ob_str(o, "\r\n");
+        body--;
+    }
+
     int row = 0;
 
     /* Render each line once, asking only for the visible window of its segments
@@ -1257,10 +1276,20 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
     else if (v->follow)
         snprintf(num, sizeof num, "  line %zu  (FOLLOW updates %llu)%s ",
                  v->L + 1, v->follow_updates, at_eof ? "  (END)" : "");
-    else if (v->chop)
-        snprintf(num, sizeof num, "  line %zu  col %zu%s ", v->L + 1,
-                 v->hscroll + 1, at_eof ? "  (END)" : "");
-    else
+    else if (v->chop) {
+        /* long-line focus: which columns are visible, and the line length. */
+        paige_line cl;
+        size_t llen =
+            (v->doc->raw_line && v->doc->raw_line(v->doc->ctx, v->L, &cl))
+                ? cl.len
+                : 0;
+        size_t a = v->hscroll + 1;
+        size_t b = v->hscroll + (size_t)view_content_width(v);
+        if (b > llen)
+            b = llen;
+        snprintf(num, sizeof num, "  line %zu  col %zu-%zu/%zu%s ", v->L + 1, a,
+                 b, llen, at_eof ? "  (END)" : "");
+    } else
         snprintf(num, sizeof num, "  line %zu%s ", v->L + 1,
                  at_eof ? "  (END)" : "");
     ob_str(o, num);
@@ -1455,6 +1484,10 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
             follow_pause(&v);
             view_clear_message(&v);
             perf_enter(&v, &t, &o);
+            break;
+        case PK_RULER:
+            v.ruler = !v.ruler;
+            dirty = true;
             break;
         case PK_SEARCH_FWD:
             follow_pause(&v);

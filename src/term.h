@@ -42,6 +42,7 @@ enum paige_key {
     PK_HELP,
     PK_FOLLOW,
     PK_PERF,
+    PK_RULER,
     PK_LEFT,
     PK_RIGHT,
     PK_HOME,

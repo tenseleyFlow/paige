@@ -542,6 +542,16 @@ int main(void)
         printf("FAIL: chop mode should show one row per logical line\n");
         fails++;
     }
+    /* long-line focus: a column ruler row and a col-range/length readout. */
+    pty_send_text(master, "|"); /* toggle the ruler */
+    pty_wait_for(master, buf, sizeof buf, "....+....|", WAIT_MS);
+    if (!pty_has(buf, "....+....|") || !pty_has(buf, "col 1-")) {
+        printf("FAIL: column ruler / readout missing in chop mode\n");
+        pty_dump_visible(buf);
+        fails++;
+    }
+    pty_send_text(master, "|"); /* toggle off */
+    pty_drain(master, buf, sizeof buf, 150);
     pty_send(master, "\x1b[C", 3);
     pty_wait_for(master, buf, sizeof buf, "col 9", WAIT_MS);
     if (!pty_has(buf, "col 9") || !pty_has(buf, "<")) {
