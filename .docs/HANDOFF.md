@@ -37,7 +37,7 @@ controlling terminal (the host should then print plainly).
 | `src/term.h` / `term.c` | terminal control: raw mode (ISIG/IXON cleared), alternate screen, size, SIGWINCH, fatal-signal restore, key decoding. |
 | `src/search.c` / `search.h` | the literal smart-case matcher (`memchr` first-byte skip), used by the engine's search. |
 | `src/pager.c` | the engine: `seglist`, `view` (scroll position as logical line `L` + visual segment `S`), `outbuf`, scroll math, windowed `draw()`, the key loop, digit-goto, search, marks, follow, help/perf overlays. |
-| `src/demo.c` | a reference client — a standalone byte-wrapping pager that honors the segment window. Real clients (e.g. mat) supply their own width-aware renderer. |
+| `src/demo.c` | a reference client — mmaps the file and indexes lines lazily (memchr, O(screen) first paint), with SIGBUS recovery for truncation; a byte-wrapping pager that honors the segment window. Real clients (e.g. mat) supply their own width-aware renderer. |
 | `tests/pty_test.c` | drives `paige-demo` inside a real pty via `forkpty`, feeds keystrokes, asserts on the rendered screen and stat counters. |
 | `bench/` | `pager.sh` + `pty_driver.c` benchmark harness; `BASELINE.md` records numbers. |
 
@@ -51,7 +51,8 @@ detects the full emission (`sl->n == total`) and indexes from `S`.
 ## 3. Current state — what works
 
 - **Navigation**: `j`/`k`/`↑`/`↓`, space/`f`/`b` (page), `d`/`u` (half-page),
-  `g`/`G` (top/bottom, lazy — `G` is O(screen) via `line_count`), `q`/`Ctrl-C`.
+  `g`/`G` (top/bottom, lazy — `G` is O(screen) via `line_count` or `seek_end`),
+  `q`/`Ctrl-C`.
 - **Search**: `/` `?` `n` `N`, incremental preview (bounded per keystroke, never
   wraps), authoritative full search on Enter (wrap-around, smart-case, "search
   wrapped" / "pattern not found"), match highlighting, keypress-cancel of a long
@@ -96,8 +97,10 @@ differently.
 
 The pager features, the Sprint-7 differentiators (search overview, progressive
 status, semantic jumps via the `landmark` hook, long-line ruler/readout,
-reversible filters), and the Sprint-5 deferrals (multidoc `:n`/`:p`,
-appended-line highlight) are all **done**. What's left is smaller polish:
+reversible filters), the Sprint-5 deferrals (multidoc `:n`/`:p`, appended-line
+highlight), and the **first-paint parity campaign** (lazy mmap demo, the
+`seek_end` hook, mat-as-host benchmarking — see §7) are all **done**. What's left
+is smaller polish:
 
 - **Minimap / collapse**: the search overview shows "n of N" but not a visual
   minimap; long-line tools have a ruler/readout but no fold/collapse.
@@ -123,14 +126,23 @@ needs `<sys/ioctl.h>`/`<termios.h>` before `<libutil.h>` (for `struct winsize`).
 
 ## 7. Performance
 
-`bench/pager.sh` + `bench/pty_driver.c` benchmark against `less`/`ov`/`moar` on a
-**real-source corpus** (this repo tiled to size — never `/dev/zero` or
-fixed-width random). `BASELINE.md` records numbers. The driver reports paige's
-`render`/`segments`/`search_lines` stat counters, which **isolate engine work**
-from `first_ms` (end-to-end TTFB that includes the demo host's eager
-slurp+index). The honest result: engine render/segments stay O(screen)
-regardless of file size, a huge wrapped line is O(visible), and `less` wins
-first-paint because the *demo host* indexes eagerly (not an engine limitation).
+`bench/pager.sh` + `bench/pty_driver.c` benchmark against `less`/`ov`/`moar` —
+and against **mat** (the production host) in full runs — on a **real-source
+corpus** (this repo tiled to size — never `/dev/zero` or fixed-width random).
+`BASELINE.md` records numbers. The driver reports paige's
+`render`/`segments`/`search_lines`/`host_indexed` stat counters, which **isolate
+engine work** from wall-clock `first_ms`.
+
+The first-paint parity campaign settled the old "less wins first paint" caveat:
+that gap was the *original demo host's* eager slurp+index, not the engine. The
+demo now mmaps and indexes lazily (`host_indexed` stays a screenful at first
+paint regardless of file size), so demo first paint on 64 MiB dropped from
+~147 ms to ~1.5 ms — at/below `less`. Jump-to-bottom is O(screen) once the last
+line is known: a host with `line_count` or `seek_end` jumps and fills without
+rendering to EOF (the `seek_end` hook took a no-`line_count` host's `G` from
+~1.19 s of forward-scan-render to ~the index cost, ~37 ms, on par with `less`).
+The deterministic counters are gated in CI (`bench/check.sh`, job `perf-gate`),
+including `host_indexed` so a regression back to eager indexing trips the gate.
 
 ## 8. Reference implementations
 

@@ -34,6 +34,9 @@ control over search, layout, live content, and performance counters:
   features without inspecting ANSI-rendered output.
 - `line_count(ctx, out)` exposes a known logical line count for percentage jumps;
   if unset, `%` reports that percent jumps are unavailable.
+- `seek_end(ctx, out)` lets a seekable host name the last line cheaply so
+  jump-to-bottom (`G`) stays O(screen) without a `line_count` prescan. paige
+  prefers `line_count`, then `seek_end`, then a forward scan to EOF.
 - `refresh(ctx)` lets a host report live-content changes while follow mode is
   active; paige redraws only when it returns nonzero.
 - `render_line_ex(ctx, req, sink)` receives a `paige_render_req` with draw context
@@ -78,6 +81,7 @@ should then print plainly or choose their own non-interactive fallback.
 | Search highlighting | host-rendered | honor `paige_render_req.matches` |
 | Chop / horizontal scroll | opt-in | `paige_opts.chop_long_lines` + `render_line_ex` |
 | Percent goto | opt-in | `line_count` |
+| O(screen) jump-to-bottom | opt-in | `line_count` or `seek_end` |
 | Follow mode | opt-in | `refresh` |
 | Marks, help, perf panel | built in | perf counters need `paige_opts.stats` |
 | Search overview (n of N) | built in | `raw_line` |
