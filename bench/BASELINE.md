@@ -58,3 +58,15 @@ benchmarks them when present.
   while typing (see the test suite). Wall-clock alone would have hidden this.
 
 This is a script-health + engine-laziness baseline, not a marketing comparison.
+
+## Enforcing gate
+
+The numbers above are the human-readable record. The machine-checked regression
+gate lives in `bench/baseline.json` and runs as `make bench-check` (CI job
+`perf-gate`). It asserts the **deterministic** counters — `render`/`segments` on
+first paint, jump-to-bottom, and the huge-line wrap/chop cases — as upper bounds.
+These are exact at a fixed 24×80 tty and constant across file size, so the gate is
+noise-free (unlike wall-clock) and a breach means an algorithmic regression: the
+huge-wrap bound (`render ≤ 8`) is what would have caught the O(line) wrap bug.
+`first_ms`, `rss_max`, and `search_lines` are **not** gated — they vary with host
+indexing policy, OS, and corpus size. Re-record with `sh bench/check.sh --show`.

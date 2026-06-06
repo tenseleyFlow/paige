@@ -43,6 +43,12 @@ test: paige-demo
 bench-smoke: paige-demo
 	sh bench/pager.sh --smoke
 
+# Enforcing perf gate: assert paige's deterministic engine counters stay
+# O(screen) against bench/baseline.json. Noise-free (counter-based, not
+# wall-clock); this is the CI regression gate.
+bench-check: paige-demo
+	sh bench/check.sh
+
 # Rebuild everything under ASan/UBSan and run the suite (the pty test drives the
 # instrumented demo, so the engine is what gets checked). Matches the CI job.
 asan:
@@ -56,4 +62,4 @@ fmt:
 clean:
 	rm -rf build paige-demo tests/build examples/memory
 
-.PHONY: all examples test bench-smoke asan fmt clean
+.PHONY: all examples test bench-smoke bench-check asan fmt clean

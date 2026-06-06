@@ -52,13 +52,17 @@ jobs:
             make examples CFLAGS="-std=c11 -O2 -Werror"
             PAIGE_TEST_STRICT=1 make test
 
-  benchmark-smoke:
+  perf-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v5
-      - name: Benchmark script smoke test
-        run: make bench-smoke
+      # Enforcing: asserts paige's deterministic O(screen) engine counters
+      # (render/segments) against bench/baseline.json. Runs the smoke bench
+      # internally, so it also covers script health. Counter-based, not
+      # wall-clock, so it does not flake on CI-runner load.
+      - name: Performance gate
+        run: make bench-check
 
   sanitizers:
     runs-on: ubuntu-latest
@@ -72,7 +76,7 @@ jobs:
 
   all-jobs:
     if: always()
-    needs: [lint, build, freebsd, sanitizers, benchmark-smoke]
+    needs: [lint, build, freebsd, sanitizers, perf-gate]
     runs-on: ubuntu-latest
     steps:
       - run: |
