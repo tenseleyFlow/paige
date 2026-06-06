@@ -23,6 +23,7 @@ struct seglist {
 
 struct paige_sink {
     struct seglist *sl;
+    paige_stats *stats;
 };
 
 static void sl_reset(struct seglist *s)
@@ -34,6 +35,8 @@ static void sl_reset(struct seglist *s)
 void paige_emit(paige_sink *sink, const char *bytes, size_t len)
 {
     struct seglist *s = sink->sl;
+    if (sink->stats)
+        sink->stats->segments_emitted++;
     if (s->buf_len + len > s->buf_cap) {
         size_t cap = s->buf_cap ? s->buf_cap * 2 : 4096;
         while (cap < s->buf_len + len)
@@ -71,7 +74,7 @@ static int render_req(const paige_doc *doc, paige_stats *stats,
                       struct seglist *sl, const paige_render_req *req)
 {
     sl_reset(sl);
-    struct paige_sink sink = {sl};
+    struct paige_sink sink = {sl, stats};
     if (stats)
         stats->render_calls++;
     if (doc->render_line_ex)
@@ -84,17 +87,20 @@ static int render_req(const paige_doc *doc, paige_stats *stats,
 static int render_line_matches(const paige_doc *doc, paige_stats *stats,
                                struct seglist *sl, size_t L, int w,
                                unsigned flags, size_t hscroll,
-                               const paige_match *matches, size_t nmatches)
+                               const paige_match *matches, size_t nmatches,
+                               size_t seg_first, size_t seg_max)
 {
-    paige_render_req req = {L, w, flags, hscroll, matches, nmatches};
+    paige_render_req req = {L,       w,        flags,     hscroll,
+                            matches, nmatches, seg_first, seg_max};
     return render_req(doc, stats, sl, &req);
 }
 
+/* Count the segments of line L without emitting any (seg_max == 0). */
 static int render_line(const paige_doc *doc, paige_stats *stats,
                        struct seglist *sl, size_t L, int w)
 {
     return render_line_matches(doc, stats, sl, L, w, PAIGE_RENDER_WRAP, 0, NULL,
-                               0);
+                               0, 0, 0);
 }
 
 /* ---- an output accumulator we flush to the terminal in one write ---- */
@@ -662,7 +668,7 @@ static int segcount(struct view *v, size_t L)
         return render_line(v->doc, v->stats, v->sl, L, v->width);
     return render_line_matches(v->doc, v->stats, v->sl, L,
                                view_content_width(v), PAIGE_RENDER_CHOP,
-                               v->hscroll, NULL, 0);
+                               v->hscroll, NULL, 0, 0, 0);
 }
 
 static void move_down(struct view *v, int k)
@@ -1105,40 +1111,52 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
     unsigned flags = v->chop ? PAIGE_RENDER_CHOP : PAIGE_RENDER_WRAP;
     paige_match matches[SEARCH_MATCH_MAX];
     size_t nmatches = 0;
-    int n = 0;
-    bool have_line = false; /* line L already rendered into the seglist? */
+    int row = 0;
 
-    for (int row = 0; row < body; row++) {
-        if (v->stats)
-            v->stats->rows_drawn++;
-        ob_str(o, "\x1b[K"); /* clear to end of line */
-        /* Render each logical line at most once per frame and consume its
-         * segments across the rows it spans, instead of re-rendering the whole
-         * line for every row (which made a wrapped line O(rows * line)). */
-        if (!at_eof && !have_line) {
-            nmatches = collect_matches(v, L, matches, SEARCH_MATCH_MAX);
-            n = render_line_matches(v->doc, v->stats, v->sl, L, content_w,
-                                    flags, v->hscroll, matches, nmatches);
-            have_line = true;
-            if (n == 0)
-                at_eof = true;
+    /* Render each line once, asking only for the visible window of its segments
+     * [S .. body). A renderer that honors the window keeps a long wrapped line
+     * O(visible); one that emits every segment still works — we detect the full
+     * emission (sl->n == total) and index from S instead of from 0. */
+    while (row < body && !at_eof) {
+        nmatches = collect_matches(v, L, matches, SEARCH_MATCH_MAX);
+        int total = render_line_matches(v->doc, v->stats, v->sl, L, content_w,
+                                        flags, v->hscroll, matches, nmatches,
+                                        (size_t)S, (size_t)(body - row));
+        if (total == 0) {
+            at_eof = true;
+            break;
         }
-        if (at_eof) {
-            ob_str(o, "~");
-        } else {
+        bool windowed = v->sl->n < total;
+        int base = windowed ? 0 : S; /* seglist index of absolute segment S */
+        int avail = v->sl->n - base;
+        bool overflow = v->chop && line_has_right_overflow(v, L, content_w);
+        int shown = 0;
+        while (shown < avail && row < body) {
+            if (v->stats)
+                v->stats->rows_drawn++;
+            ob_str(o, "\x1b[K"); /* clear to end of line */
             if (v->chop)
                 ob_str(o, v->hscroll > 0 ? "<" : " ");
-            if (S < n)
-                ob_put(o, v->sl->buf + v->sl->seg[S].off, v->sl->seg[S].len);
-            if (v->chop && line_has_right_overflow(v, L, content_w))
+            ob_put(o, v->sl->buf + v->sl->seg[base + shown].off,
+                   v->sl->seg[base + shown].len);
+            if (overflow)
                 ob_str(o, ">");
-            if (++S >= n) {
-                L++;
-                S = 0;
-                have_line = false;
-            }
+            ob_str(o, "\r\n");
+            shown++;
+            row++;
         }
-        ob_str(o, "\r\n");
+        if (avail <= 0 || S + shown >= total) {
+            L++;
+            S = 0;
+        } else {
+            S += shown;
+        }
+    }
+    for (; row < body; row++) {
+        if (v->stats)
+            v->stats->rows_drawn++;
+        ob_str(o, "\x1b[K~\r\n");
+        at_eof = true;
     }
 
     /* status line (reverse video) */

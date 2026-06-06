@@ -641,6 +641,54 @@ int main(void)
     finish_demo(master, pid, buf, sizeof buf, &status);
     unlink(big_tmpl);
 
+    /* A very long line in WRAP mode must materialize only the visible segment
+     * window, not every segment of the line (the old hidden O(line) cost). */
+    unsetenv("PAIGE_CHOP"); /* the chop test above set it */
+    char wrap_tmpl[4096];
+    mk_tmpl(wrap_tmpl, sizeof wrap_tmpl, "paige_wrap_XXXXXX");
+    int wfd = mkstemp(wrap_tmpl);
+    if (wfd < 0) {
+        perror("mkstemp");
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        return 1;
+    }
+    {
+        char chunk[4096];
+        memset(chunk, 'W', sizeof chunk);
+        size_t left = 1000000; /* ~25000 segments at width 40 */
+        while (left > 0) {
+            size_t k = left < sizeof chunk ? left : sizeof chunk;
+            (void)!write(wfd, chunk, k);
+            left -= k;
+        }
+        (void)!write(wfd, "\n", 1);
+    }
+    close(wfd);
+    pid = spawn_demo(&master, &ws, wrap_tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        unlink(wrap_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "WWWW", WAIT_MS);
+    pty_send_text(master, "jjj"); /* scroll within the long wrapped line */
+    pty_drain(master, buf, sizeof buf, 300);
+    pty_send_text(master, "q");
+    pty_wait_for(master, buf, sizeof buf, "paige-stats:", WAIT_MS);
+    long segs = stat_field(buf, "segments=");
+    if (segs < 0 || segs > 1000) {
+        printf("FAIL: wrap-mode long line materialized %ld segments "
+               "(expected O(visible), not O(line))\n",
+               segs);
+        fails++;
+    }
+    finish_demo(master, pid, buf, sizeof buf, &status);
+    unlink(wrap_tmpl);
+
     unlink(tmpl);
     unlink(follow_tmpl);
     unlink(chop_tmpl);

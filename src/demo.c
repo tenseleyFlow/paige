@@ -132,8 +132,12 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
     int width = req->width;
     if (width < 1)
         width = 1;
+    /* req->seg_max == 0 means "count only, emit nothing"; otherwise emit just
+     * the requested window [seg_first, seg_first+seg_max). Total segment count
+     * is always returned so the pager can scroll. */
     if (len == 0) {
-        paige_emit(sink, "", 0);
+        if (req->seg_max != 0 && req->seg_first == 0)
+            paige_emit(sink, "", 0);
         return 1;
     }
 
@@ -145,21 +149,26 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
     }
 
     if ((req->flags & PAIGE_RENDER_CHOP) != 0) {
-        size_t off = req->hscroll < len ? req->hscroll : len;
-        size_t chunk = len - off < (size_t)width ? len - off : (size_t)width;
-        emit_highlighted(sink, d->data + start + off, off, chunk, matches,
-                         nmatches);
+        if (req->seg_max != 0) {
+            size_t off = req->hscroll < len ? req->hscroll : len;
+            size_t chunk =
+                len - off < (size_t)width ? len - off : (size_t)width;
+            emit_highlighted(sink, d->data + start + off, off, chunk, matches,
+                             nmatches);
+        }
         return 1;
     }
 
-    int segs = 0;
-    for (size_t i = 0; i < len; i += (size_t)width) {
+    size_t total = (len + (size_t)width - 1) / (size_t)width;
+    size_t emitted = 0;
+    for (size_t s = req->seg_first; s < total && emitted < req->seg_max; s++) {
+        size_t i = s * (size_t)width;
         size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
         emit_highlighted(sink, d->data + start + i, i, chunk, matches,
                          nmatches);
-        segs++;
+        emitted++;
     }
-    return segs;
+    return (int)total;
 }
 
 static int raw_line(void *ctx, size_t L, paige_line *out)
@@ -304,10 +313,11 @@ int main(int argc, char **argv)
             stderr,
             "paige-stats: render=%llu frames=%llu rows=%llu bytes=%llu "
             "writes=%llu search_lines=%llu hscroll=%llu follow_refreshes=%llu "
-            "follow_updates=%llu\n",
+            "follow_updates=%llu segments=%llu\n",
             stats.render_calls, stats.frames, stats.rows_drawn,
             stats.bytes_emitted, stats.writes, stats.search_lines,
-            stats.hscroll_moves, stats.follow_refreshes, stats.follow_updates);
+            stats.hscroll_moves, stats.follow_refreshes, stats.follow_updates,
+            stats.segments_emitted);
     }
     free(d.data);
     free(d.line);

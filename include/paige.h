@@ -46,6 +46,17 @@ typedef struct paige_render_req {
     size_t hscroll;
     const paige_match *matches;
     size_t nmatches;
+    /*
+     * Visible segment window. To keep wrap-mode rendering O(visible) on very
+     * long lines, the renderer SHOULD emit only segments
+     * [seg_first, seg_first+seg_max) in top-to-bottom order, and ALWAYS return
+     * the line's total segment count. seg_max == 0 means "emit nothing, just
+     * return the count". Honoring this is optional: a renderer that emits every
+     * segment still works — paige detects the full emission and falls back. A
+     * zero-initialized request (seg_first=0, seg_max=0) is the count-only form.
+     */
+    size_t seg_first;
+    size_t seg_max;
 } paige_render_req;
 
 typedef struct paige_stats {
@@ -58,6 +69,8 @@ typedef struct paige_stats {
     unsigned long long hscroll_moves;
     unsigned long long follow_refreshes;
     unsigned long long follow_updates;
+    unsigned long long segments_emitted; /* paige_emit calls (work materialized,
+                                            not just rows shown) */
 } paige_stats;
 
 typedef struct paige_doc {
