@@ -54,15 +54,20 @@ detects the full emission (`sl->n == total`) and indexes from `S`.
   `g`/`G` (top/bottom, lazy — `G` is O(screen) via `line_count`), `q`/`Ctrl-C`.
 - **Search**: `/` `?` `n` `N`, incremental preview (bounded per keystroke, never
   wraps), authoritative full search on Enter (wrap-around, smart-case, "search
-  wrapped" / "pattern not found"), match highlighting, and keypress-cancel of a
-  long scan.
+  wrapped" / "pattern not found"), match highlighting, keypress-cancel of a long
+  scan, a "match n of N" overview, progressive "searching…" status, and `&` to
+  filter the view to matching lines (reversibly).
 - **Horizontal scroll / chop mode** (`←`/`→`, `chop_long_lines`): `<`/`>`
-  overflow markers, search-hit reveal, column in the status.
+  overflow markers, search-hit reveal, a `col a-b/len` readout, and `|` for a
+  column ruler.
+- **Semantic jumps** (`]`/`[`): jump to host-defined landmarks via the
+  `landmark` hook (the demo recognizes `#` headers and ERROR/WARN lines).
+- **Multiple documents** (`:n`/`:p`): `paige_run_many()` pages an ordered set.
 - **Niceties**: percent goto (`50%`), marks (`m`/`'`, plus `''`/`'^`/`'$`/`'.`),
   `h` help overlay, `P` performance panel, transient status messages, live
   incremental goto-line.
 - **Follow mode** (`F`, tail-f style) via the host `refresh` hook; pauses on
-  manual nav.
+  manual nav, and highlights freshly-appended lines (`paige_render_req.appended`).
 - **Terminal safety**: ISIG/IXON cleared so the pager owns Ctrl-C/Ctrl-S;
   SA_RESETHAND handlers restore the terminal on any fatal signal.
 - `quit_if_one_screen`: print plainly and return when the content fits.
@@ -89,17 +94,16 @@ differently.
 
 ## 5. Roadmap — what's left
 
-The P1/P2 pager features (search, chop/hscroll, marks, percent, follow, help) are
-**done**. What remains is distinctive UX and multi-document support:
+The pager features, the Sprint-7 differentiators (search overview, progressive
+status, semantic jumps via the `landmark` hook, long-line ruler/readout,
+reversible filters), and the Sprint-5 deferrals (multidoc `:n`/`:p`,
+appended-line highlight) are all **done**. What's left is smaller polish:
 
-- **Innovation differentiators** (the biggest gap): progressive status while
-  working, a search-result overview (total hit count / "n of N" / minimap),
-  semantic jumps (next error/timestamp/diff-hunk/JSON-key at the host boundary),
-  long-line focus tools (ruler/column/collapse), and reversible filters.
-- **Multiple documents**: `:n`/`:p` navigation (a `paige_run_many` entry point),
-  deciding the engine-vs-host boundary; appended-line highlighting in follow.
+- **Minimap / collapse**: the search overview shows "n of N" but not a visual
+  minimap; long-line tools have a ruler/readout but no fold/collapse.
 - **Allocation introspection**: `segments_emitted` exists; per-frame
   terminal-damage and allocation counters could extend `paige_stats`.
+- **Mouse wheel** is still host-owned/deferred.
 
 `paige_emit`/`ob_put` degrade gracefully on `realloc` failure (drop the segment
 rather than crash); a future hardening pass could surface an error flag.
