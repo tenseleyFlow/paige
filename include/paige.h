@@ -118,6 +118,17 @@ typedef struct paige_doc {
      * unknown or streaming document to EOF. */
     int (*line_count)(void *ctx, size_t *out);
 
+    /* Optional cheap "where is the end" for seekable hosts that do NOT supply a
+     * line_count. Set `out` to the final logical line index (0-based) and
+     * return nonzero, or return 0 to decline (paige then falls back to a
+     * forward scan). Lets `G`/jump-to-bottom reach the end in O(screen) without
+     * a full prescan: a host that mmaps or seeks can locate the last line far
+     * more cheaply than rendering every line to EOF. Contract:
+     * render_line(*out) must be the last line that returns nonzero, and
+     * render_line(*out + 1) must return 0. paige prefers line_count when
+     * present, then seek_end, then a forward scan. */
+    int (*seek_end)(void *ctx, size_t *out);
+
     /* Optional live-content refresh. Called while follow mode is active; return
      * nonzero when paige should redraw because content changed. */
     int (*refresh)(void *ctx);

@@ -227,6 +227,18 @@ static int line_count(void *ctx, size_t *out)
     return 1;
 }
 
+/* Reference seek_end: hand the engine the last line index so `G` is O(screen)
+ * without a line_count. This demo already holds a full index, so it is trivial;
+ * a lazily-indexing host (e.g. mat) would seek/scan from EOF to find it. */
+static int seek_end(void *ctx, size_t *out)
+{
+    struct doc *d = ctx;
+    if (d->nlines == 0)
+        return 0;
+    *out = d->nlines - 1;
+    return 1;
+}
+
 /* A landmark is a structural marker a reader jumps between: a header (#) or an
  * ERROR/WARN log line. A real host would recognize its own semantics. */
 static int is_landmark(struct doc *d, size_t L)
@@ -346,6 +358,7 @@ static int fill_doc(struct doc *d, paige_doc *pd, const char *path)
                       .title = d->title,
                       .raw_line = raw_line,
                       .line_count = line_count,
+                      .seek_end = seek_end,
                       .render_line_ex = render_line_ex,
                       .refresh = refresh_doc,
                       .landmark = landmark};
@@ -353,6 +366,8 @@ static int fill_doc(struct doc *d, paige_doc *pd, const char *path)
         pd->raw_line = NULL;
     if (getenv("PAIGE_NO_COUNT"))
         pd->line_count = NULL;
+    if (getenv("PAIGE_NO_SEEK_END"))
+        pd->seek_end = NULL;
     return 1;
 }
 
