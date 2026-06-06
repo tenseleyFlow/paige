@@ -52,6 +52,14 @@ static void mk_tmpl(char *out, size_t cap, const char *stem)
     snprintf(out, cap, "%s/%s", d, stem);
 }
 
+/* Pull the render-call counter out of the demo's "paige-stats: render=N ..."
+ * line, or -1 if absent. Used to assert an interaction stayed O(screen). */
+static long stat_render(const char *buf)
+{
+    const char *p = strstr(buf, "render=");
+    return p ? atol(p + 7) : -1;
+}
+
 static pid_t spawn_demo(int *master, struct winsize *ws, const char *path)
 {
     pid_t pid = forkpty(master, NULL, NULL, ws);
@@ -548,6 +556,47 @@ int main(void)
     }
     pty_send_text(master, "q");
     finish_demo(master, pid, buf, sizeof buf, &status);
+    /* G on a large known-length doc must stay lazy: jump to the final screen
+     * without rendering every line (goto_bottom was O(document)). */
+    char big_tmpl[4096];
+    mk_tmpl(big_tmpl, sizeof big_tmpl, "paige_big_XXXXXX");
+    int bfd = mkstemp(big_tmpl);
+    if (bfd < 0) {
+        perror("mkstemp");
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        return 1;
+    }
+    for (int i = 1; i <= 10000; i++) {
+        char line[16];
+        int m = snprintf(line, sizeof line, "L%05d\n", i);
+        (void)!write(bfd, line, (size_t)m);
+    }
+    close(bfd);
+    pid = spawn_demo(&master, &ws, big_tmpl);
+    if (pid < 0) {
+        unlink(tmpl);
+        unlink(follow_tmpl);
+        unlink(chop_tmpl);
+        unlink(big_tmpl);
+        return 1;
+    }
+    pty_wait_for(master, buf, sizeof buf, "L00001", WAIT_MS);
+    pty_send_text(master, "G");
+    pty_wait_for(master, buf, sizeof buf, "L10000", WAIT_MS);
+    pty_send_text(master, "q");
+    pty_wait_for(master, buf, sizeof buf, "paige-stats:", WAIT_MS);
+    long rc = stat_render(buf);
+    if (rc < 0 || rc > 1000) {
+        printf("FAIL: G rendered %ld lines on a 10000-line doc (expected "
+               "O(screen), not O(document))\n",
+               rc);
+        fails++;
+    }
+    finish_demo(master, pid, buf, sizeof buf, &status);
+    unlink(big_tmpl);
+
     unlink(tmpl);
     unlink(follow_tmpl);
     unlink(chop_tmpl);

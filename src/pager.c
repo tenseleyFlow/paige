@@ -677,6 +677,20 @@ static bool goto_percent(struct view *v, unsigned long pct)
 
 static void goto_bottom(struct view *v, int body)
 {
+    size_t count = 0;
+    if (v->doc->line_count && v->doc->line_count(v->doc->ctx, &count) &&
+        count > 0) {
+        /* Known length: jump straight to the last line and fill the screen
+         * upward. segcount renders only that one line plus the screenful
+         * move_up walks — O(screen), not a full-document scan. */
+        v->L = count - 1;
+        int n = segcount(v, v->L);
+        v->S = n > 0 ? n - 1 : 0;
+        move_up(v, body - 1);
+        return;
+    }
+    /* Unknown length (a streaming host with no line_count): we have to scan to
+     * find EOF, the same as `less +G` on a pipe. */
     if (segcount(v, v->L) == 0) {
         v->L = 0;
         v->S = 0;
