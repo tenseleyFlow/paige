@@ -80,6 +80,12 @@ should then print plainly or choose their own non-interactive fallback.
 | Percent goto | opt-in | `line_count` |
 | Follow mode | opt-in | `refresh` |
 | Marks, help, perf panel | built in | perf counters need `paige_opts.stats` |
+| Search overview (n of N) | built in | `raw_line` |
+| Reversible filter (`&`) | built in | `raw_line` |
+| Semantic jumps (`]`/`[`) | opt-in | `landmark` hook |
+| Column ruler (`\|`) | built in | chop mode |
+| Multiple documents (`:n`/`:p`) | built in | `paige_run_many` |
+| Follow + appended-line highlight | opt-in | `refresh`; honor `req.appended` |
 | Benchmarks | manual | `bench/pager.sh` fixtures |
 
 ## Limits
@@ -88,16 +94,18 @@ should then print plainly or choose their own non-interactive fallback.
 - Search is literal smart-case substring search, not regex.
 - ANSI styling is passed through host-rendered bytes; clipping styled output is a
   host concern unless the host implements `render_line_ex` carefully.
-- Mouse support, multi-document switching, semantic jumps, filters, and appended
-  line highlighting are intentionally host-owned or deferred.
+- Mouse support is intentionally host-owned/deferred; semantic jumps are host-
+  defined through the `landmark` hook.
 - Follow mode polls through `refresh`; paige does not watch files itself.
 
 ## Keys
 `q` quit · `j`/`k`/`↑`/`↓` line · space/`f`/`b` page · `d`/`u` half-page ·
-`g`/`G` top/bottom · `/`/`?` search · `n`/`N` repeat search · `m<char>` set
+`g`/`G` top/bottom · `/`/`?` search (shows match n of N) · `n`/`N` repeat ·
+`&` filter to matching lines (again to clear) · `]`/`[` next/prev landmark ·
+`:n`/`:p` next/prev document · `m<char>` set
 mark · `'<char>` jump to mark · `''` previous position · `F` follow live content
-until manual navigation · `P` performance panel · `h` help · `←`/`→`
-horizontal scroll in chop mode ·
+until manual navigation (appended lines are highlighted) · `P` performance panel ·
+`h` help · `←`/`→` horizontal scroll · `|` column ruler (chop mode) ·
 digits jump to a line as you type — the view follows each keystroke (`1`,`6` →
 line 16), and a pause longer than ~600ms commits the number and starts a fresh
 one (`1` … `6` → line 6). End a number with `%` to jump to that percentage when

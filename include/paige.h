@@ -46,6 +46,20 @@ typedef struct paige_render_req {
     size_t hscroll;
     const paige_match *matches;
     size_t nmatches;
+    /*
+     * Visible segment window. To keep wrap-mode rendering O(visible) on very
+     * long lines, the renderer SHOULD emit only segments
+     * [seg_first, seg_first+seg_max) in top-to-bottom order, and ALWAYS return
+     * the line's total segment count. seg_max == 0 means "emit nothing, just
+     * return the count". Honoring this is optional: a renderer that emits every
+     * segment still works — paige detects the full emission and falls back. A
+     * zero-initialized request (seg_first=0, seg_max=0) is the count-only form.
+     */
+    size_t seg_first;
+    size_t seg_max;
+    /* Nonzero when this line was just appended in follow mode; the renderer may
+     * draw it specially (e.g. bold) to highlight what is new. */
+    int appended;
 } paige_render_req;
 
 typedef struct paige_stats {
@@ -58,6 +72,8 @@ typedef struct paige_stats {
     unsigned long long hscroll_moves;
     unsigned long long follow_refreshes;
     unsigned long long follow_updates;
+    unsigned long long segments_emitted; /* paige_emit calls (work materialized,
+                                            not just rows shown) */
 } paige_stats;
 
 typedef struct paige_doc {
@@ -66,8 +82,9 @@ typedef struct paige_doc {
     /*
      * Emit the visual segments of logical line `lineno`, laid out for a content
      * area of `width` columns, by calling paige_emit() once per segment in top
-     * to bottom order. Return the number of segments emitted (>= 1), or 0 to
-     * signal that `lineno` is at or past the end of the document.
+     * to bottom order. Return the number of segments emitted (>= 1, and it must
+     * fit in int), or 0 to signal that `lineno` is at or past the end of the
+     * document.
      *
      * Must be deterministic for a given (lineno, width): paige may call it more
      * than once for the same line (e.g. on redraw or scroll).
@@ -104,6 +121,13 @@ typedef struct paige_doc {
     /* Optional live-content refresh. Called while follow mode is active; return
      * nonzero when paige should redraw because content changed. */
     int (*refresh)(void *ctx);
+
+    /* Optional semantic jump. Set `out` to the next host-defined landmark line
+     * strictly past `from` in direction `dir` (>0 forward, <0 backward) and
+     * return nonzero, or return 0 if there is none. Lets `]`/`[` jump between
+     * meaningful points (errors, headers, diff hunks, timestamps, …) that only
+     * the host can recognize. */
+    int (*landmark)(void *ctx, size_t from, int dir, size_t *out);
 } paige_doc;
 
 typedef struct paige_opts {
@@ -121,5 +145,12 @@ typedef struct paige_opts {
  * is no usable controlling terminal (the caller should then print plainly).
  */
 int paige_run(const paige_doc *doc, const paige_opts *opts);
+
+/*
+ * Page an ordered set of documents, switchable with `:n` / `:p`. Equivalent to
+ * paige_run() when ndocs == 1. Returns 0 on a normal quit, or -1 if there is no
+ * usable controlling terminal.
+ */
+int paige_run_many(const paige_doc *docs, size_t ndocs, const paige_opts *opts);
 
 #endif /* PAIGE_H */

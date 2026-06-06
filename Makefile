@@ -43,10 +43,17 @@ test: paige-demo
 bench-smoke: paige-demo
 	sh bench/pager.sh --smoke
 
+# Rebuild everything under ASan/UBSan and run the suite (the pty test drives the
+# instrumented demo, so the engine is what gets checked). Matches the CI job.
+asan:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="-std=c11 -O1 -g -fsanitize=address,undefined"
+	$(MAKE) test
+
 fmt:
 	clang-format -i src/*.c src/*.h include/*.h bench/*.c examples/*.c
 
 clean:
 	rm -rf build paige-demo tests/build examples/memory
 
-.PHONY: all examples test bench-smoke fmt clean
+.PHONY: all examples test bench-smoke asan fmt clean

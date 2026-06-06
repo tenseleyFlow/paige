@@ -2,6 +2,7 @@
 #include "search.h"
 #include "term.h"
 
+#include <poll.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -22,6 +23,7 @@ struct seglist {
 
 struct paige_sink {
     struct seglist *sl;
+    paige_stats *stats;
 };
 
 static void sl_reset(struct seglist *s)
@@ -33,6 +35,8 @@ static void sl_reset(struct seglist *s)
 void paige_emit(paige_sink *sink, const char *bytes, size_t len)
 {
     struct seglist *s = sink->sl;
+    if (sink->stats)
+        sink->stats->segments_emitted++;
     if (s->buf_len + len > s->buf_cap) {
         size_t cap = s->buf_cap ? s->buf_cap * 2 : 4096;
         while (cap < s->buf_len + len)
@@ -70,7 +74,7 @@ static int render_req(const paige_doc *doc, paige_stats *stats,
                       struct seglist *sl, const paige_render_req *req)
 {
     sl_reset(sl);
-    struct paige_sink sink = {sl};
+    struct paige_sink sink = {sl, stats};
     if (stats)
         stats->render_calls++;
     if (doc->render_line_ex)
@@ -83,17 +87,20 @@ static int render_req(const paige_doc *doc, paige_stats *stats,
 static int render_line_matches(const paige_doc *doc, paige_stats *stats,
                                struct seglist *sl, size_t L, int w,
                                unsigned flags, size_t hscroll,
-                               const paige_match *matches, size_t nmatches)
+                               const paige_match *matches, size_t nmatches,
+                               size_t seg_first, size_t seg_max, int appended)
 {
-    paige_render_req req = {L, w, flags, hscroll, matches, nmatches};
+    paige_render_req req = {L,        w,         flags,   hscroll, matches,
+                            nmatches, seg_first, seg_max, appended};
     return render_req(doc, stats, sl, &req);
 }
 
+/* Count the segments of line L without emitting any (seg_max == 0). */
 static int render_line(const paige_doc *doc, paige_stats *stats,
                        struct seglist *sl, size_t L, int w)
 {
     return render_line_matches(doc, stats, sl, L, w, PAIGE_RENDER_WRAP, 0, NULL,
-                               0);
+                               0, 0, 0, 0);
 }
 
 /* ---- an output accumulator we flush to the terminal in one write ---- */
@@ -141,7 +148,18 @@ enum {
     SEARCH_MATCH_MAX = 64,
     STATUS_MAX = 96,
     MARK_COUNT = 256,
+    /* While typing an incremental search, scan at most this many lines per
+     * keystroke so a miss on a huge document stays responsive instead of
+     * walking the whole file (and wrapping) on every character. Enter runs the
+     * authoritative unbounded search. */
+    SEARCH_PREVIEW_MAX = 10000,
+    /* On an unbounded search, peek for a cancelling keypress this often (must
+     * be a power of two for the bit-mask check). */
+    SEARCH_INTERRUPT_CHUNK = 1 << 16,
 };
+
+/* Sentinel max_scan: search the whole document (no per-keystroke bound). */
+#define SEARCH_SCAN_ALL ((size_t)-1)
 
 enum search_dir {
     SEARCH_FORWARD = 1,
@@ -167,6 +185,10 @@ struct search_state {
     size_t active_L;
     size_t active_off;
     size_t active_len;
+    bool interrupted;  /* last scan was cancelled by a keypress */
+    bool wrapped_last; /* last activation wrapped past an edge */
+    size_t total; /* total matches of the current pattern (0 = none/unknown) */
+    size_t index; /* 1-based index of the active match within total */
     char message[SEARCH_STATUS_MAX];
 };
 
@@ -181,14 +203,34 @@ struct mark {
     struct view_pos pos;
 };
 
+/* When a filter is active the engine pages this wrapper document, which maps a
+ * filtered line index to a real line in the underlying document. */
+struct filter_ctx {
+    const paige_doc *real;
+    const size_t *map;
+    size_t n;
+};
+
 struct view {
     const paige_doc *doc;
     struct seglist *sl;
+    int tty_fd; /* for cancelling a long search; <=0 disables */
     int width;
     bool chop;
+    bool ruler;                /* show a column ruler row (chop mode) */
+    const paige_doc *real_doc; /* the unfiltered document */
+    bool filtered;
+    size_t *filter_map; /* filtered index -> real line */
+    size_t filter_n, filter_cap;
+    struct filter_ctx fctx;
+    paige_doc fdoc;
+    const paige_doc *docs; /* multi-document set (:n / :p) */
+    size_t ndocs, doc_idx;
     size_t hscroll;
     bool follow;
     unsigned long long follow_updates;
+    size_t follow_new_from; /* first newly-appended line (follow highlight) */
+    bool follow_has_new;
     size_t L;     /* top logical line */
     int S;        /* top visual segment within L */
     long pending; /* number being typed for goto, or -1 when not entering */
@@ -284,13 +326,43 @@ static bool raw_line(const paige_doc *doc, size_t L, paige_line *line)
     return doc->raw_line(doc->ctx, L, line) != 0;
 }
 
+/* Non-blocking peek at the tty: if a key is waiting, consume it and report that
+ * the user wants to cancel the in-progress scan. */
+static bool search_interrupted(struct view *v)
+{
+    if (v->tty_fd <= 0)
+        return false;
+    struct pollfd pfd = {v->tty_fd, POLLIN, 0};
+    if (poll(&pfd, 1, 0) <= 0)
+        return false;
+    unsigned char c;
+    return read(v->tty_fd, &c, 1) > 0;
+}
+
+/* Per-line bookkeeping for the document scans: stop when the bounded preview
+ * window is exhausted, or — on a long unbounded scan — when a keypress cancels
+ * it (only checked every SEARCH_INTERRUPT_CHUNK lines, so it is ~free). */
+static bool scan_should_stop(struct view *v, size_t *scanned, size_t max_scan)
+{
+    if (++*scanned >= max_scan)
+        return true;
+    if ((*scanned & (SEARCH_INTERRUPT_CHUNK - 1)) == 0 &&
+        search_interrupted(v)) {
+        v->search->interrupted = true;
+        return true;
+    }
+    return false;
+}
+
 static bool search_forward_doc(struct view *v, const char *pattern,
                                size_t pattern_len, size_t start_L,
-                               size_t start_off, struct search_hit *hit)
+                               size_t start_off, struct search_hit *hit,
+                               size_t max_scan)
 {
     bool case_sensitive = paige_search_smart_case(pattern, pattern_len);
     paige_line line;
     size_t off;
+    size_t scanned = 0;
 
     for (size_t L = start_L; raw_line(v->doc, L, &line); L++) {
         if (v->stats)
@@ -302,7 +374,12 @@ static bool search_forward_doc(struct view *v, const char *pattern,
             *hit = (struct search_hit){L, off, pattern_len, false};
             return true;
         }
+        if (scan_should_stop(v, &scanned, max_scan))
+            return false; /* preview window exhausted, or user cancelled */
     }
+    if (max_scan != SEARCH_SCAN_ALL)
+        return false; /* bounded preview: never wrap (only a committed search)
+                       */
     for (size_t L = 0; raw_line(v->doc, L, &line); L++) {
         if (v->stats)
             v->stats->search_lines++;
@@ -311,6 +388,8 @@ static bool search_forward_doc(struct view *v, const char *pattern,
             *hit = (struct search_hit){L, off, pattern_len, true};
             return true;
         }
+        if (scan_should_stop(v, &scanned, max_scan))
+            return false;
     }
     return false;
 }
@@ -330,11 +409,13 @@ static bool last_raw_line(struct view *v, size_t *last)
 
 static bool search_backward_doc(struct view *v, const char *pattern,
                                 size_t pattern_len, size_t start_L,
-                                size_t before, struct search_hit *hit)
+                                size_t before, struct search_hit *hit,
+                                size_t max_scan)
 {
     bool case_sensitive = paige_search_smart_case(pattern, pattern_len);
     paige_line line;
     size_t off;
+    size_t scanned = 0;
 
     for (size_t i = start_L + 1; i-- > 0;) {
         if (raw_line(v->doc, i, &line)) {
@@ -347,11 +428,16 @@ static bool search_backward_doc(struct view *v, const char *pattern,
                 *hit = (struct search_hit){i, off, pattern_len, false};
                 return true;
             }
+            if (scan_should_stop(v, &scanned, max_scan))
+                return false; /* preview window exhausted, or user cancelled */
         }
         if (i == 0)
             break;
     }
 
+    if (max_scan != SEARCH_SCAN_ALL)
+        return false; /* bounded preview: never wrap (only a committed search)
+                       */
     size_t last;
     if (!last_raw_line(v, &last))
         return false;
@@ -365,6 +451,8 @@ static bool search_backward_doc(struct view *v, const char *pattern,
                 *hit = (struct search_hit){i, off, pattern_len, true};
                 return true;
             }
+            if (scan_should_stop(v, &scanned, max_scan))
+                return false;
         }
         if (i == 0)
             break;
@@ -373,7 +461,7 @@ static bool search_backward_doc(struct view *v, const char *pattern,
 }
 
 static bool search_doc(struct view *v, int dir, size_t start_L, size_t boundary,
-                       struct search_hit *hit)
+                       struct search_hit *hit, size_t max_scan)
 {
     size_t pattern_len;
     const char *pattern = search_pattern(v->search, &pattern_len);
@@ -381,8 +469,9 @@ static bool search_doc(struct view *v, int dir, size_t start_L, size_t boundary,
         return false;
     if (dir == SEARCH_FORWARD)
         return search_forward_doc(v, pattern, pattern_len, start_L, boundary,
-                                  hit);
-    return search_backward_doc(v, pattern, pattern_len, start_L, boundary, hit);
+                                  hit, max_scan);
+    return search_backward_doc(v, pattern, pattern_len, start_L, boundary, hit,
+                               max_scan);
 }
 
 static void search_activate(struct view *v, const struct search_hit *hit)
@@ -391,6 +480,7 @@ static void search_activate(struct view *v, const struct search_hit *hit)
     v->search->active_L = hit->L;
     v->search->active_off = hit->off;
     v->search->active_len = hit->len;
+    v->search->wrapped_last = hit->wrapped;
     v->L = hit->L;
     v->S = 0;
     if (v->chop) {
@@ -411,22 +501,88 @@ static void search_activate(struct view *v, const struct search_hit *hit)
 static void search_not_found(struct view *v)
 {
     v->search->active = false;
+    v->search->total = 0;
+    v->search->index = 0;
     snprintf(v->search->message, sizeof v->search->message,
              "pattern not found");
 }
 
+/* Count every occurrence of the active pattern in the document and the 1-based
+ * index of the match at (active_L, active_off). Interruptible — a keypress
+ * stops it and the partial count is returned. O(document), run once per
+ * pattern. */
+static size_t count_matches(struct view *v, size_t active_L, size_t active_off,
+                            size_t *index_out)
+{
+    size_t plen;
+    const char *pat = search_pattern(v->search, &plen);
+    *index_out = 0;
+    if (plen == 0 || !v->doc->raw_line)
+        return 0;
+    bool cs = paige_search_smart_case(pat, plen);
+    paige_line line;
+    size_t total = 0, scanned = 0;
+    for (size_t L = 0; raw_line(v->doc, L, &line); L++) {
+        size_t off = 0, m;
+        while (paige_search_find_forward(line.bytes, line.len, pat, plen, off,
+                                         cs, &m)) {
+            total++;
+            if (L < active_L || (L == active_L && m <= active_off))
+                *index_out = total;
+            off = m + plen; /* non-overlapping */
+        }
+        if (scan_should_stop(v, &scanned, SEARCH_SCAN_ALL))
+            break; /* cancelled: report the partial count */
+    }
+    return total;
+}
+
+/* Recompute total + active index for the committed pattern (one full scan). */
+static void search_update_count(struct view *v)
+{
+    v->search->total = count_matches(v, v->search->active_L,
+                                     v->search->active_off, &v->search->index);
+}
+
+/* Advance the 1-based match index after an n/N step, using the wrap flag the
+ * scan recorded (O(1), no rescan). */
+static void search_step_index(struct view *v, int dir)
+{
+    if (v->search->total == 0)
+        return;
+    if (v->search->wrapped_last)
+        v->search->index = (dir == SEARCH_FORWARD) ? 1 : v->search->total;
+    else if (dir == SEARCH_FORWARD)
+        v->search->index =
+            v->search->index < v->search->total ? v->search->index + 1 : 1;
+    else
+        v->search->index =
+            v->search->index > 1 ? v->search->index - 1 : v->search->total;
+}
+
 static bool search_run_from(struct view *v, int dir, size_t start_L,
-                            size_t boundary)
+                            size_t boundary, size_t max_scan)
 {
     struct search_hit hit;
-    if (search_doc(v, dir, start_L, boundary, &hit)) {
+    v->search->interrupted = false;
+    if (search_doc(v, dir, start_L, boundary, &hit, max_scan)) {
         search_activate(v, &hit);
         return true;
+    }
+    if (v->search->interrupted) {
+        v->search->active = false;
+        snprintf(v->search->message, sizeof v->search->message,
+                 "search interrupted");
+        return false;
     }
     search_not_found(v);
     return false;
 }
 
+/* Live preview while the user is still typing the pattern: bounded forward (or
+ * backward) scan from the origin, no wrap-around, so each keystroke stays cheap
+ * on a huge document. A miss here is silent — it may just be past the preview
+ * window; Enter runs the full search and reports a real not-found. */
 static void search_refresh_entry(struct view *v, const struct view_pos *origin)
 {
     if (v->search->entry_len == 0) {
@@ -437,9 +593,12 @@ static void search_refresh_entry(struct view *v, const struct view_pos *origin)
     }
     view_restore(v, origin);
     search_run_from(v, v->search->entry_dir, origin->L,
-                    v->search->entry_dir == SEARCH_FORWARD ? 0 : (size_t)-1);
-    if (!v->search->active)
+                    v->search->entry_dir == SEARCH_FORWARD ? 0 : (size_t)-1,
+                    SEARCH_PREVIEW_MAX);
+    if (!v->search->active) {
         view_restore(v, origin);
+        search_clear_message(v->search);
+    }
 }
 
 static void search_copy_entry_to_pattern(struct search_state *s)
@@ -498,15 +657,27 @@ static int search_enter(struct view *v, struct paige_term *t, struct outbuf *o,
                 *v->search = saved;
                 view_restore(v, &origin);
             } else {
-                bool found = v->search->active;
-                char message[SEARCH_STATUS_MAX];
-                memcpy(message, v->search->message, sizeof message);
                 search_copy_entry_to_pattern(v->search);
                 v->search->entering = false;
-                if (!found)
-                    memcpy(v->search->message, message, sizeof message);
-                else
+                /* Authoritative unbounded search from the origin: the live
+                 * preview was bounded and may have missed a far match. */
+                view_restore(v, &origin);
+                /* Progressive status: paint "searching..." before the (possibly
+                 * long) full-document search + count, so the user isn't left
+                 * staring at a frozen frame on a huge file. */
+                view_set_message(v, "searching...");
+                draw(v, t, o);
+                write_counted(t->out_fd, o->p, o->len, v->stats);
+                bool found = search_run_from(
+                    v, v->search->dir, origin.L,
+                    v->search->dir == SEARCH_FORWARD ? 0 : (size_t)-1,
+                    SEARCH_SCAN_ALL);
+                v->message[0] =
+                    '\0'; /* clear "searching..." (keep search msg) */
+                if (found) {
                     view_note_previous(v, &origin);
+                    search_update_count(v);
+                }
             }
             return PK_NONE;
         }
@@ -541,14 +712,18 @@ static void search_repeat(struct view *v, int dir)
     if (dir == SEARCH_FORWARD) {
         size_t start_L = v->search->active ? v->search->active_L : v->L;
         size_t start_off = v->search->active ? v->search->active_off + 1 : 0;
-        found = search_run_from(v, SEARCH_FORWARD, start_L, start_off);
+        found = search_run_from(v, SEARCH_FORWARD, start_L, start_off,
+                                SEARCH_SCAN_ALL);
     } else {
         size_t start_L = v->search->active ? v->search->active_L : v->L;
         size_t before = v->search->active ? v->search->active_off : (size_t)-1;
-        found = search_run_from(v, SEARCH_BACKWARD, start_L, before);
+        found = search_run_from(v, SEARCH_BACKWARD, start_L, before,
+                                SEARCH_SCAN_ALL);
     }
-    if (found)
+    if (found) {
         view_note_previous(v, &origin);
+        search_step_index(v, dir);
+    }
 }
 
 static size_t collect_matches(struct view *v, size_t L, paige_match *matches,
@@ -589,7 +764,7 @@ static int segcount(struct view *v, size_t L)
         return render_line(v->doc, v->stats, v->sl, L, v->width);
     return render_line_matches(v->doc, v->stats, v->sl, L,
                                view_content_width(v), PAIGE_RENDER_CHOP,
-                               v->hscroll, NULL, 0);
+                               v->hscroll, NULL, 0, 0, 0, 0);
 }
 
 static void move_down(struct view *v, int k)
@@ -677,6 +852,20 @@ static bool goto_percent(struct view *v, unsigned long pct)
 
 static void goto_bottom(struct view *v, int body)
 {
+    size_t count = 0;
+    if (v->doc->line_count && v->doc->line_count(v->doc->ctx, &count) &&
+        count > 0) {
+        /* Known length: jump straight to the last line and fill the screen
+         * upward. segcount renders only that one line plus the screenful
+         * move_up walks — O(screen), not a full-document scan. */
+        v->L = count - 1;
+        int n = segcount(v, v->L);
+        v->S = n > 0 ? n - 1 : 0;
+        move_up(v, body - 1);
+        return;
+    }
+    /* Unknown length (a streaming host with no line_count): we have to scan to
+     * find EOF, the same as `less +G` on a pipe. */
     if (segcount(v, v->L) == 0) {
         v->L = 0;
         v->S = 0;
@@ -695,11 +884,21 @@ static bool follow_refresh(struct view *v, int body)
         return false;
     if (v->stats)
         v->stats->follow_refreshes++;
+    size_t before = 0;
+    bool counted =
+        v->doc->line_count && v->doc->line_count(v->doc->ctx, &before);
     if (!v->doc->refresh(v->doc->ctx))
         return false;
     if (v->stats)
         v->stats->follow_updates++;
     v->follow_updates++;
+    /* Mark the freshly-appended lines so draw() can highlight them. */
+    size_t after = 0;
+    if (counted && v->doc->line_count &&
+        v->doc->line_count(v->doc->ctx, &after) && after > before) {
+        v->follow_new_from = before;
+        v->follow_has_new = true;
+    }
     goto_bottom(v, body);
     return true;
 }
@@ -719,6 +918,7 @@ static void follow_start(struct view *v, int body)
 static void follow_pause(struct view *v)
 {
     v->follow = false;
+    v->follow_has_new = false; /* the new-line highlight is transient */
 }
 
 static void move_left(struct view *v, size_t cols)
@@ -751,6 +951,178 @@ static void jump_to_pos(struct view *v, const struct view_pos *pos)
     view_restore(v, pos);
     view_clamp(v);
     view_note_previous(v, &origin);
+}
+
+/* Semantic jump: ask the host for the next/prev landmark line and go there. */
+static void landmark_jump(struct view *v, int dir)
+{
+    if (!v->doc->landmark) {
+        view_set_message(v, "no landmarks");
+        return;
+    }
+    size_t target;
+    if (v->doc->landmark(v->doc->ctx, v->L, dir, &target)) {
+        struct view_pos origin;
+        view_save(v, &origin);
+        v->L = target;
+        v->S = 0;
+        v->hscroll = 0;
+        view_clamp(v);
+        view_note_previous(v, &origin);
+        view_set_message(v, dir > 0 ? "next landmark" : "previous landmark");
+    } else {
+        view_set_message(v, dir > 0 ? "no next landmark" : "no prev landmark");
+    }
+}
+
+/* ---- reversible filter: page only the lines matching a pattern ---- */
+
+static int filter_render_ex(void *ctx, const paige_render_req *req,
+                            paige_sink *sink)
+{
+    struct filter_ctx *f = ctx;
+    if (req->lineno >= f->n)
+        return 0;
+    paige_render_req r = *req;
+    r.lineno = f->map[req->lineno];
+    if (f->real->render_line_ex)
+        return f->real->render_line_ex(f->real->ctx, &r, sink);
+    if (f->real->render_line)
+        return f->real->render_line(f->real->ctx, r.lineno, r.width, sink);
+    return 0;
+}
+
+static int filter_raw(void *ctx, size_t L, paige_line *out)
+{
+    struct filter_ctx *f = ctx;
+    if (L >= f->n || !f->real->raw_line)
+        return 0;
+    return f->real->raw_line(f->real->ctx, f->map[L], out);
+}
+
+static int filter_count(void *ctx, size_t *out)
+{
+    struct filter_ctx *f = ctx;
+    *out = f->n;
+    return 1;
+}
+
+/* Build the filtered index: real lines whose text matches `pat`. O(document),
+ * interruptible. */
+static bool build_filter(struct view *v, const char *pat, size_t plen)
+{
+    bool cs = paige_search_smart_case(pat, plen);
+    paige_line line;
+    size_t n = 0, scanned = 0, off;
+    const paige_doc *rd = v->real_doc;
+    if (!rd->raw_line)
+        return false;
+    for (size_t L = 0; rd->raw_line(rd->ctx, L, &line); L++) {
+        if (paige_search_find_forward(line.bytes, line.len, pat, plen, 0, cs,
+                                      &off)) {
+            if (n == v->filter_cap) {
+                size_t cap = v->filter_cap ? v->filter_cap * 2 : 256;
+                size_t *m = realloc(v->filter_map, cap * sizeof *m);
+                if (!m)
+                    return false;
+                v->filter_map = m;
+                v->filter_cap = cap;
+            }
+            v->filter_map[n++] = L;
+        }
+        if (scan_should_stop(v, &scanned, SEARCH_SCAN_ALL))
+            break;
+    }
+    v->filter_n = n;
+    return true;
+}
+
+/* Toggle a reversible filter to the current search pattern: page only the
+ * matching lines. A second press restores the full document. */
+static void filter_toggle(struct view *v)
+{
+    if (v->filtered) {
+        v->filtered = false;
+        v->doc = v->real_doc;
+        v->L = 0;
+        v->S = 0;
+        v->hscroll = 0;
+        view_set_message(v, "filter cleared");
+        return;
+    }
+    size_t plen = v->search ? v->search->pattern_len : 0;
+    if (plen == 0) {
+        view_set_message(v, "search first, then & to filter");
+        return;
+    }
+    if (!build_filter(v, v->search->pattern, plen) || v->filter_n == 0) {
+        view_set_message(v, "filter: no matches");
+        return;
+    }
+    /* The active match position is a real-line index; it has no meaning in the
+     * filtered view, so drop it (the user can search again within the filter).
+     */
+    v->search->active = false;
+    v->search->total = 0;
+    v->fctx.real = v->real_doc;
+    v->fctx.map = v->filter_map;
+    v->fctx.n = v->filter_n;
+    v->fdoc = (paige_doc){.ctx = &v->fctx,
+                          .render_line_ex = filter_render_ex,
+                          .raw_line = filter_raw,
+                          .line_count = filter_count,
+                          .title = v->real_doc->title};
+    v->doc = &v->fdoc;
+    v->filtered = true;
+    v->L = 0;
+    v->S = 0;
+    v->hscroll = 0;
+    view_set_message(v, "filtered");
+}
+
+/* ---- multiple documents (:n / :p) ---- */
+
+static void doc_switch(struct view *v, int delta)
+{
+    if (v->ndocs <= 1) {
+        view_set_message(v, "single document");
+        return;
+    }
+    size_t ni = v->doc_idx;
+    if (delta > 0 && v->doc_idx + 1 < v->ndocs)
+        ni = v->doc_idx + 1;
+    else if (delta < 0 && v->doc_idx > 0)
+        ni = v->doc_idx - 1;
+    if (ni == v->doc_idx) {
+        view_set_message(v, delta > 0 ? "last document" : "first document");
+        return;
+    }
+    v->doc_idx = ni;
+    v->filtered = false;
+    v->real_doc = &v->docs[ni];
+    v->doc = v->real_doc;
+    v->L = 0;
+    v->S = 0;
+    v->hscroll = 0;
+    if (v->search) {
+        v->search->active = false;
+        v->search->total = 0;
+    }
+    view_set_message(v, "%s  (%zu/%zu)",
+                     v->doc->title ? v->doc->title : "document", ni + 1,
+                     v->ndocs);
+}
+
+/* `:` prefix: read one key and switch documents (n = next, p = previous). */
+static void filecmd_enter(struct view *v, struct paige_term *t)
+{
+    int k = paige_term_key_input(t);
+    if (k == PK_CHAR && t->ch == 'n')
+        doc_switch(v, 1);
+    else if (k == PK_CHAR && t->ch == 'p')
+        doc_switch(v, -1);
+    else
+        view_set_message(v, "use :n / :p for next / prev file");
 }
 
 static void mark_set(struct view *v, unsigned char mark)
@@ -942,19 +1314,20 @@ static void help_enter(struct view *v, struct paige_term *t, struct outbuf *o)
         "",
         "Search:",
         "  /, ?               forward/backward search",
-        "  n, N               repeat search",
+        "  n, N               repeat search (shows match n of N)",
+        "  &                  filter to matching lines (again to clear)",
         "",
-        "Marks:",
-        "  m<char>            set mark",
-        "  '<char>            jump to mark",
-        "  ''                 previous position",
-        "  '^, '$, '.         top, bottom, current line",
+        "Jumps:",
+        "  m<char> / '<char>  set / jump to mark; '' previous position",
+        "  ], [               next / previous landmark (errors, headers)",
+        "  :n, :p             next / previous document",
         "",
         "Performance:",
         "  P                  open performance panel",
         "",
         "Chop mode:",
         "  left/right arrows  horizontal scroll",
+        "  |                  toggle the column ruler",
         "",
         "Help:",
         "  h                  open this help",
@@ -1014,36 +1387,77 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
     int S = v->S;
     bool at_eof = false;
 
-    for (int row = 0; row < body; row++) {
-        if (v->stats)
-            v->stats->rows_drawn++;
-        ob_str(o, "\x1b[K"); /* clear to end of line */
-        paige_match matches[SEARCH_MATCH_MAX];
-        size_t nmatches = 0;
-        if (!at_eof)
-            nmatches = collect_matches(v, L, matches, SEARCH_MATCH_MAX);
-        int content_w = view_content_width(v);
-        unsigned flags = v->chop ? PAIGE_RENDER_CHOP : PAIGE_RENDER_WRAP;
-        int n = at_eof
-                    ? 0
-                    : render_line_matches(v->doc, v->stats, v->sl, L, content_w,
-                                          flags, v->hscroll, matches, nmatches);
-        if (n == 0) {
+    int content_w = view_content_width(v);
+    unsigned flags = v->chop ? PAIGE_RENDER_CHOP : PAIGE_RENDER_WRAP;
+    paige_match matches[SEARCH_MATCH_MAX];
+    size_t nmatches = 0;
+
+    /* Optional column ruler (chop mode): one row of ticks aligned to the
+     * content area, '|' every 10 columns and '+' every 5, reflecting hscroll.
+     */
+    if (v->ruler && v->chop && body > 1) {
+        ob_str(o, "\x1b[K "); /* leading space aligns past the chop marker */
+        char rul[512];
+        size_t rn = 0;
+        for (int i = 0; i < content_w && rn < sizeof rul - 1; i++) {
+            size_t c = v->hscroll + (size_t)i + 1;
+            rul[rn++] = (c % 10 == 0) ? '|' : (c % 5 == 0) ? '+' : '.';
+        }
+        rul[rn] = '\0';
+        ob_str(o, rul);
+        ob_str(o, "\r\n");
+        body--;
+    }
+
+    int row = 0;
+
+    /* Render each line once, asking only for the visible window of its segments
+     * [S .. body). A renderer that honors the window keeps a long wrapped line
+     * O(visible); one that emits every segment still works — we detect the full
+     * emission (sl->n == total) and index from S instead of from 0. */
+    while (row < body && !at_eof) {
+        nmatches = collect_matches(v, L, matches, SEARCH_MATCH_MAX);
+        int appended =
+            (v->follow_has_new && !v->filtered && L >= v->follow_new_from) ? 1
+                                                                           : 0;
+        int total = render_line_matches(
+            v->doc, v->stats, v->sl, L, content_w, flags, v->hscroll, matches,
+            nmatches, (size_t)S, (size_t)(body - row), appended);
+        if (total == 0) {
             at_eof = true;
-            ob_str(o, "~");
-        } else {
+            break;
+        }
+        bool windowed = v->sl->n < total;
+        int base = windowed ? 0 : S; /* seglist index of absolute segment S */
+        int avail = v->sl->n - base;
+        bool overflow = v->chop && line_has_right_overflow(v, L, content_w);
+        int shown = 0;
+        while (shown < avail && row < body) {
+            if (v->stats)
+                v->stats->rows_drawn++;
+            ob_str(o, "\x1b[K"); /* clear to end of line */
             if (v->chop)
                 ob_str(o, v->hscroll > 0 ? "<" : " ");
-            if (S < n)
-                ob_put(o, v->sl->buf + v->sl->seg[S].off, v->sl->seg[S].len);
-            if (v->chop && line_has_right_overflow(v, L, content_w))
+            ob_put(o, v->sl->buf + v->sl->seg[base + shown].off,
+                   v->sl->seg[base + shown].len);
+            if (overflow)
                 ob_str(o, ">");
-            if (++S >= n) {
-                L++;
-                S = 0;
-            }
+            ob_str(o, "\r\n");
+            shown++;
+            row++;
         }
-        ob_str(o, "\r\n");
+        if (avail <= 0 || S + shown >= total) {
+            L++;
+            S = 0;
+        } else {
+            S += shown;
+        }
+    }
+    for (; row < body; row++) {
+        if (v->stats)
+            v->stats->rows_drawn++;
+        ob_str(o, "\x1b[K~\r\n");
+        at_eof = true;
     }
 
     /* status line (reverse video) */
@@ -1075,13 +1489,31 @@ static bool draw(struct view *v, struct paige_term *t, struct outbuf *o)
     else if (v->follow)
         snprintf(num, sizeof num, "  line %zu  (FOLLOW updates %llu)%s ",
                  v->L + 1, v->follow_updates, at_eof ? "  (END)" : "");
-    else if (v->chop)
-        snprintf(num, sizeof num, "  line %zu  col %zu%s ", v->L + 1,
-                 v->hscroll + 1, at_eof ? "  (END)" : "");
-    else
+    else if (v->chop) {
+        /* long-line focus: which columns are visible, and the line length. */
+        paige_line cl;
+        size_t llen =
+            (v->doc->raw_line && v->doc->raw_line(v->doc->ctx, v->L, &cl))
+                ? cl.len
+                : 0;
+        size_t a = v->hscroll + 1;
+        size_t b = v->hscroll + (size_t)view_content_width(v);
+        if (b > llen)
+            b = llen;
+        snprintf(num, sizeof num, "  line %zu  col %zu-%zu/%zu%s ", v->L + 1, a,
+                 b, llen, at_eof ? "  (END)" : "");
+    } else
         snprintf(num, sizeof num, "  line %zu%s ", v->L + 1,
                  at_eof ? "  (END)" : "");
     ob_str(o, num);
+    /* search overview: which match of how many. */
+    if (v->search && v->search->active && v->search->total > 0 &&
+        !v->search->entering && v->search->message[0] == '\0') {
+        char minfo[48];
+        snprintf(minfo, sizeof minfo, " [%zu/%zu] ", v->search->index,
+                 v->search->total);
+        ob_str(o, minfo);
+    }
     ob_str(o, "\x1b[0m");
     return at_eof;
 }
@@ -1091,10 +1523,13 @@ static void print_plain(const paige_doc *doc, paige_stats *stats,
                         struct seglist *sl, int width)
 {
     for (size_t L = 0;; L++) {
-        int n = render_line(doc, stats, sl, L, width);
+        /* Emit every segment (seg_max = all), not count-only — print_plain
+         * actually writes the seglist, unlike segcount. */
+        int n = render_line_matches(doc, stats, sl, L, width, PAIGE_RENDER_WRAP,
+                                    0, NULL, 0, 0, (size_t)-1, 0);
         if (n == 0)
             break;
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < sl->n; i++) {
             write_counted(STDOUT_FILENO, sl->buf + sl->seg[i].off,
                           sl->seg[i].len, stats);
             write_counted(STDOUT_FILENO, "\n", 1, stats);
@@ -1102,12 +1537,15 @@ static void print_plain(const paige_doc *doc, paige_stats *stats,
     }
 }
 
-int paige_run(const paige_doc *doc, const paige_opts *opts)
+int paige_run_many(const paige_doc *docs, size_t ndocs, const paige_opts *opts)
 {
     paige_stats *stats = opts ? opts->stats : NULL;
     if (stats)
         memset(stats, 0, sizeof *stats);
-    if (!doc || (!doc->render_line && !doc->render_line_ex))
+    if (!docs || ndocs == 0)
+        return -1;
+    const paige_doc *doc = &docs[0];
+    if (!doc->render_line && !doc->render_line_ex)
         return -1;
 
     struct paige_term t;
@@ -1116,8 +1554,9 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
 
     struct seglist sl = {0};
 
-    /* Quit-if-one-screen: if everything fits, just print it (no alt screen). */
-    if (opts && opts->quit_if_one_screen) {
+    /* Quit-if-one-screen: if everything fits, just print it (no alt screen).
+     * Only for a single document — multidoc needs the interactive loop. */
+    if (ndocs == 1 && opts && opts->quit_if_one_screen) {
         int visual = 0, fits = 1;
         for (size_t L = 0;; L++) {
             int n = render_line(doc, stats, &sl, L, t.cols);
@@ -1140,7 +1579,12 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
     paige_term_enter(&t);
     struct search_state search = {0};
     struct view v = {.doc = doc,
+                     .real_doc = doc,
+                     .docs = docs,
+                     .ndocs = ndocs,
+                     .doc_idx = 0,
                      .sl = &sl,
+                     .tty_fd = t.tty_fd,
                      .width = t.cols,
                      .chop =
                          opts && opts->chop_long_lines && doc->render_line_ex,
@@ -1262,6 +1706,30 @@ int paige_run(const paige_doc *doc, const paige_opts *opts)
             view_clear_message(&v);
             perf_enter(&v, &t, &o);
             break;
+        case PK_RULER:
+            v.ruler = !v.ruler;
+            dirty = true;
+            break;
+        case PK_LANDMARK_NEXT:
+            follow_pause(&v);
+            landmark_jump(&v, SEARCH_FORWARD);
+            dirty = true;
+            break;
+        case PK_LANDMARK_PREV:
+            follow_pause(&v);
+            landmark_jump(&v, SEARCH_BACKWARD);
+            dirty = true;
+            break;
+        case PK_FILTER:
+            follow_pause(&v);
+            filter_toggle(&v);
+            dirty = true;
+            break;
+        case PK_FILECMD:
+            follow_pause(&v);
+            filecmd_enter(&v, &t);
+            dirty = true;
+            break;
         case PK_SEARCH_FWD:
             follow_pause(&v);
             view_clear_message(&v);
@@ -1353,5 +1821,11 @@ done:
     close(t.tty_fd);
     sl_free(&sl);
     free(o.p);
+    free(v.filter_map);
     return 0;
+}
+
+int paige_run(const paige_doc *doc, const paige_opts *opts)
+{
+    return paige_run_many(doc, 1, opts);
 }

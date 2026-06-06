@@ -8,4 +8,7 @@
 *.a
 *.swp
 .DS_Store
-/.docs/
+# planning/refs/audits stay local, but the handoff doc ships with the repo
+/.docs/*
+!/.docs/HANDOFF.md
+*.core

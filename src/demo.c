@@ -8,6 +8,7 @@
 #include "paige.h"
 
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,8 @@ struct doc {
     size_t nlines;
     const char *path;
     const char *title;
+    char *hlbuf; /* reused highlight scratch, grown as needed */
+    size_t hlcap;
 };
 
 static int line_bounds(struct doc *d, size_t L, size_t *start, size_t *len)
@@ -68,7 +71,7 @@ static int match_cmp(const void *a, const void *b)
     return 0;
 }
 
-static void emit_highlighted(paige_sink *sink, const char *bytes,
+static void emit_highlighted(struct doc *d, paige_sink *sink, const char *bytes,
                              size_t seg_start, size_t len,
                              const paige_match *matches, size_t nmatches)
 {
@@ -87,12 +90,19 @@ static void emit_highlighted(paige_sink *sink, const char *bytes,
         return;
     }
 
+    /* Reuse a per-document scratch buffer instead of malloc/free per segment
+     * per row per frame while a search is active. */
     size_t cap = len + overlaps * SGR_LEN * 2;
-    char *out = malloc(cap);
-    if (!out) {
-        paige_emit(sink, bytes, len);
-        return;
+    if (d->hlcap < cap) {
+        char *nb = realloc(d->hlbuf, cap);
+        if (!nb) {
+            paige_emit(sink, bytes, len); /* degrade: emit unhighlighted */
+            return;
+        }
+        d->hlbuf = nb;
+        d->hlcap = cap;
     }
+    char *out = d->hlbuf;
 
     size_t pos = 0, out_len = 0;
     for (size_t i = 0; i < nmatches && pos < len; i++) {
@@ -119,7 +129,26 @@ static void emit_highlighted(paige_sink *sink, const char *bytes,
         out_len += len - pos;
     }
     paige_emit(sink, out, out_len);
-    free(out);
+}
+
+/* Emit one segment wrapped in bold, to highlight a freshly-appended line. */
+static void emit_appended(struct doc *d, paige_sink *sink, const char *bytes,
+                          size_t len)
+{
+    size_t need = len + 8; /* \x1b[1m (4) + \x1b[0m (4) */
+    if (d->hlcap < need) {
+        char *nb = realloc(d->hlbuf, need);
+        if (!nb) {
+            paige_emit(sink, bytes, len);
+            return;
+        }
+        d->hlbuf = nb;
+        d->hlcap = need;
+    }
+    memcpy(d->hlbuf, "\x1b[1m", 4);
+    memcpy(d->hlbuf + 4, bytes, len);
+    memcpy(d->hlbuf + 4 + len, "\x1b[0m", 4);
+    paige_emit(sink, d->hlbuf, len + 8);
 }
 
 static int render_line_ex(void *ctx, const paige_render_req *req,
@@ -132,8 +161,12 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
     int width = req->width;
     if (width < 1)
         width = 1;
+    /* req->seg_max == 0 means "count only, emit nothing"; otherwise emit just
+     * the requested window [seg_first, seg_first+seg_max). Total segment count
+     * is always returned so the pager can scroll. */
     if (len == 0) {
-        paige_emit(sink, "", 0);
+        if (req->seg_max != 0 && req->seg_first == 0)
+            paige_emit(sink, "", 0);
         return 1;
     }
 
@@ -145,21 +178,35 @@ static int render_line_ex(void *ctx, const paige_render_req *req,
     }
 
     if ((req->flags & PAIGE_RENDER_CHOP) != 0) {
-        size_t off = req->hscroll < len ? req->hscroll : len;
-        size_t chunk = len - off < (size_t)width ? len - off : (size_t)width;
-        emit_highlighted(sink, d->data + start + off, off, chunk, matches,
-                         nmatches);
+        if (req->seg_max != 0) {
+            size_t off = req->hscroll < len ? req->hscroll : len;
+            size_t chunk =
+                len - off < (size_t)width ? len - off : (size_t)width;
+            if (req->appended)
+                emit_appended(d, sink, d->data + start + off, chunk);
+            else
+                emit_highlighted(d, sink, d->data + start + off, off, chunk,
+                                 matches, nmatches);
+        }
         return 1;
     }
 
-    int segs = 0;
-    for (size_t i = 0; i < len; i += (size_t)width) {
+    size_t total = (len + (size_t)width - 1) / (size_t)width;
+    if (total > (size_t)INT_MAX)
+        total =
+            (size_t)INT_MAX; /* render_line returns int: clamp absurd lines */
+    size_t emitted = 0;
+    for (size_t s = req->seg_first; s < total && emitted < req->seg_max; s++) {
+        size_t i = s * (size_t)width;
         size_t chunk = (len - i < (size_t)width) ? len - i : (size_t)width;
-        emit_highlighted(sink, d->data + start + i, i, chunk, matches,
-                         nmatches);
-        segs++;
+        if (req->appended)
+            emit_appended(d, sink, d->data + start + i, chunk);
+        else
+            emit_highlighted(d, sink, d->data + start + i, i, chunk, matches,
+                             nmatches);
+        emitted++;
     }
-    return segs;
+    return (int)total;
 }
 
 static int raw_line(void *ctx, size_t L, paige_line *out)
@@ -178,6 +225,38 @@ static int line_count(void *ctx, size_t *out)
     struct doc *d = ctx;
     *out = d->nlines;
     return 1;
+}
+
+/* A landmark is a structural marker a reader jumps between: a header (#) or an
+ * ERROR/WARN log line. A real host would recognize its own semantics. */
+static int is_landmark(struct doc *d, size_t L)
+{
+    size_t s, len;
+    if (!line_bounds(d, L, &s, &len))
+        return 0;
+    const char *p = d->data + s;
+    return (len >= 1 && p[0] == '#') ||
+           (len >= 5 && memcmp(p, "ERROR", 5) == 0) ||
+           (len >= 4 && memcmp(p, "WARN", 4) == 0);
+}
+
+static int landmark(void *ctx, size_t from, int dir, size_t *out)
+{
+    struct doc *d = ctx;
+    if (dir > 0) {
+        for (size_t L = from + 1; L < d->nlines; L++)
+            if (is_landmark(d, L)) {
+                *out = L;
+                return 1;
+            }
+    } else {
+        for (size_t L = from; L-- > 0;)
+            if (is_landmark(d, L)) {
+                *out = L;
+                return 1;
+            }
+    }
+    return 0;
 }
 
 static char *slurp(const char *path, size_t *out_size)
@@ -252,35 +331,61 @@ static int refresh_doc(void *ctx)
     return 1;
 }
 
+/* Slurp + index `path` (NULL = stdin) and fill a paige_doc for it. */
+static int fill_doc(struct doc *d, paige_doc *pd, const char *path)
+{
+    memset(d, 0, sizeof *d);
+    d->data = slurp(path, &d->size);
+    if (!d->data)
+        return 0;
+    d->title = path ? path : "stdin";
+    d->path = path;
+    index_lines(d);
+    *pd = (paige_doc){.ctx = d,
+                      .render_line = render_line,
+                      .title = d->title,
+                      .raw_line = raw_line,
+                      .line_count = line_count,
+                      .render_line_ex = render_line_ex,
+                      .refresh = refresh_doc,
+                      .landmark = landmark};
+    if (getenv("PAIGE_NO_RAW"))
+        pd->raw_line = NULL;
+    if (getenv("PAIGE_NO_COUNT"))
+        pd->line_count = NULL;
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
-    const char *path = argc > 1 ? argv[1] : NULL;
-    if (path == NULL && isatty(STDIN_FILENO)) {
-        fprintf(stderr, "usage: paige-demo FILE (or pipe content on stdin)\n");
+    if (argc > 1 &&
+        (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
+        printf("paige-demo (paige %d.%d.%d)\n", PAIGE_VERSION_MAJOR,
+               PAIGE_VERSION_MINOR, PAIGE_VERSION_PATCH);
+        return 0;
+    }
+    if (argc < 2 && isatty(STDIN_FILENO)) {
+        fprintf(stderr,
+                "usage: paige-demo FILE... (or pipe content on stdin)\n");
         return 2;
     }
-    struct doc d;
-    memset(&d, 0, sizeof d);
-    d.data = slurp(path, &d.size);
-    if (d.data == NULL) {
-        fprintf(stderr, "paige-demo: cannot read %s\n", path ? path : "stdin");
+
+    size_t ndocs = argc > 1 ? (size_t)(argc - 1) : 1; /* stdin counts as 1 */
+    struct doc *d = calloc(ndocs, sizeof *d);
+    paige_doc *docs = calloc(ndocs, sizeof *docs);
+    if (!d || !docs) {
+        perror("calloc");
         return 1;
     }
-    d.title = path ? path : "stdin";
-    d.path = path;
-    index_lines(&d);
+    for (size_t i = 0; i < ndocs; i++) {
+        const char *path = argc > 1 ? argv[i + 1] : NULL;
+        if (!fill_doc(&d[i], &docs[i], path)) {
+            fprintf(stderr, "paige-demo: cannot read %s\n",
+                    path ? path : "stdin");
+            return 1;
+        }
+    }
 
-    paige_doc doc = {.ctx = &d,
-                     .render_line = render_line,
-                     .title = d.title,
-                     .raw_line = raw_line,
-                     .line_count = line_count,
-                     .render_line_ex = render_line_ex,
-                     .refresh = refresh_doc};
-    if (getenv("PAIGE_NO_RAW"))
-        doc.raw_line = NULL;
-    if (getenv("PAIGE_NO_COUNT"))
-        doc.line_count = NULL;
     paige_stats stats = {0};
     paige_opts opts = {.quit_if_one_screen = 1};
     if (getenv("PAIGE_CHOP"))
@@ -295,21 +400,27 @@ int main(int argc, char **argv)
     const char *fms = getenv("PAIGE_FOLLOW_MS");
     if (fms)
         opts.follow_poll_ms = atoi(fms);
-    if (paige_run(&doc, &opts) < 0) {
-        /* No terminal: dump plainly. */
-        (void)!write(STDOUT_FILENO, d.data, d.size);
+    if (paige_run_many(docs, ndocs, &opts) < 0) {
+        /* No terminal: dump the first document plainly. */
+        (void)!write(STDOUT_FILENO, d[0].data, d[0].size);
     }
     if (show_stats) {
         fprintf(
             stderr,
             "paige-stats: render=%llu frames=%llu rows=%llu bytes=%llu "
             "writes=%llu search_lines=%llu hscroll=%llu follow_refreshes=%llu "
-            "follow_updates=%llu\n",
+            "follow_updates=%llu segments=%llu\n",
             stats.render_calls, stats.frames, stats.rows_drawn,
             stats.bytes_emitted, stats.writes, stats.search_lines,
-            stats.hscroll_moves, stats.follow_refreshes, stats.follow_updates);
+            stats.hscroll_moves, stats.follow_refreshes, stats.follow_updates,
+            stats.segments_emitted);
     }
-    free(d.data);
-    free(d.line);
+    for (size_t i = 0; i < ndocs; i++) {
+        free(d[i].data);
+        free(d[i].line);
+        free(d[i].hlbuf);
+    }
+    free(d);
+    free(docs);
     return 0;
 }
